@@ -1,8 +1,10 @@
 //! OpenAI Codex OAuth configuration and constants.
 //!
 
-/// OpenAI Codex OAuth client ID for Claurst
-pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// OpenAI Codex OAuth requires a registered application.
+/// Claurst does not have its own registered OAuth app with OpenAI.
+/// Users should use an API key from platform.openai.com instead.
+pub const CODEX_CLIENT_ID: &str = "";  // Requires own registered app
 
 /// OpenAI OAuth authorization endpoint
 pub const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -35,7 +37,8 @@ mod tests {
 
     #[test]
     fn test_codex_constants_not_empty() {
-        assert!(!CODEX_CLIENT_ID.is_empty());
+        // CODEX_CLIENT_ID is intentionally empty — Claurst has no registered OAuth app
+        assert!(CODEX_CLIENT_ID.is_empty(), "CODEX_CLIENT_ID should be empty (no registered app)");
         assert!(!CODEX_AUTHORIZE_URL.is_empty());
         assert!(!CODEX_TOKEN_URL.is_empty());
         assert!(!CODEX_REDIRECT_URI.is_empty());

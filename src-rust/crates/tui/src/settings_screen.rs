@@ -686,7 +686,7 @@ struct PrivacySnapshot {
 }
 
 impl PrivacySnapshot {
-    /// Load privacy fields from `~/.claude/settings.json`.
+    /// Load privacy fields from `~/.claurst/settings.json`.
     fn load() -> Self {
         let path = claurst_core::config::Settings::config_dir().join("settings.json");
         let Ok(content) = std::fs::read_to_string(&path) else { return Self::default(); };
@@ -765,7 +765,7 @@ fn build_privacy_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
-        "  Note: Edit ~/.claude/settings.json to toggle telemetry/sharing values.",
+        "  Note: Edit ~/.claurst/settings.json to toggle telemetry/sharing values.",
         Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
     )]));
     lines.push(Line::from(""));
@@ -909,7 +909,7 @@ fn build_keybindings_lines(_screen: &SettingsScreen) -> Vec<Line<'static>> {
     lines.push(section_header("Key Bindings"));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![Span::styled(
-        "  Edit ~/.claude/keybindings.json to customise bindings.",
+        "  Edit ~/.claurst/keybindings.json to customise bindings.",
         Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
     )]));
     lines.push(Line::from(""));

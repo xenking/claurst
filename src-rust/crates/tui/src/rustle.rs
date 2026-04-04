@@ -54,7 +54,7 @@ fn eye_spans(s: &'static str) -> Vec<Span<'static>> {
     let mut buf_is_eyeball = false;
 
     for ch in s.chars() {
-        let is_eyeball = ch == '▘' || ch == '▝';
+        let is_eyeball = ch == '▘' || ch == '▝' || ch == '▀';
         if is_eyeball != buf_is_eyeball && !buf.is_empty() {
             let style = if buf_is_eyeball { eyeball_style() } else { eye_bg_style() };
             spans.push(Span::styled(buf.clone(), style));
@@ -84,23 +84,23 @@ pub fn rustle_lines(pose: &RustlePose) -> [Line<'static>; 5] {
 
     let (r2l, r2e, r2r) = match pose {
         RustlePose::Default => (
-            "█▄█",      // left claw tip, ▄ gap-to-connect, head edge
-            "▘ █▘ ",    // 2-char eyes with upper-left eyeball highlights (▘ = white)
-            "█▄█",      // head edge, ▄ connect-to-gap, right claw tip
+            "█▄█",       // left claw tip, ▄ gap-to-connect, head edge
+            "▀ █ ▀",    // single-pixel upper-half eyes (centered gaze)
+            "█▄█",       // head edge, ▄ connect-to-gap, right claw tip
         ),
         RustlePose::ArmsUp => (
-            "█▀█",      // ▀ = claw raised (upper half = arm up)
-            "▘ █▘ ",
-            "█▀█",      // raised right claw
+            "█▀█",       // ▀ = claw raised (upper half = arm up)
+            "▀ █ ▀",    // single-pixel upper-half eyes (centered gaze)
+            "█▀█",       // raised right claw
         ),
         RustlePose::LookLeft => (
             "█▄█",
-            "▘ █▘ ",    // ▘ upper-left = already looking left
+            "▘ █ ▘",    // single-pixel upper-left quarter blocks = eyes shifted left
             "█▄█",
         ),
         RustlePose::LookRight => (
             "█▄█",
-            " ▝█ ▝",   // ▝ upper-right = eyeballs shifted right
+            "▝ █ ▝",    // single-pixel upper-right quarter blocks = eyes shifted right
             "█▄█",
         ),
     };

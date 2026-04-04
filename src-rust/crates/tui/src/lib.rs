@@ -77,7 +77,7 @@ pub mod mcp_view;
 pub mod prompt_input;
 /// Session quality feedback survey overlay.
 pub mod feedback_survey;
-/// Memory file selector overlay (CLAUDE.md browser).
+/// Memory file selector overlay (AGENTS.md browser).
 pub mod memory_file_selector;
 /// Read-only hooks configuration browser.
 pub mod hooks_config_menu;
@@ -89,7 +89,7 @@ pub mod voice_mode_notice;
 pub mod message_copy;
 /// Desktop app upsell startup dialog (shown at startup on macOS/Windows x64).
 pub mod desktop_upsell_startup;
-/// Memory update notification banner (shown after Claude updates a CLAUDE.md file).
+/// Memory update notification banner (shown after Claurst updates a AGENTS.md file).
 pub mod memory_update_notification;
 /// MCP elicitation dialog (form-based user input requested by MCP servers).
 pub mod elicitation_dialog;
@@ -97,12 +97,18 @@ pub mod elicitation_dialog;
 pub mod model_picker;
 /// Session browser overlay (/session, /resume, /rename, /export).
 pub mod session_browser;
-/// Startup dialog for malformed settings.json or CLAUDE.md.
+/// Startup dialog for malformed settings.json or AGENTS.md.
 pub mod invalid_config_dialog;
 /// Startup confirmation dialog for --dangerously-skip-permissions mode.
 pub mod bypass_permissions_dialog;
 /// First-launch onboarding / welcome dialog.
 pub mod onboarding_dialog;
+/// Reusable fuzzy-search selection dialog widget.
+pub mod dialog_select;
+/// Masked text input overlay for entering API keys.
+pub mod key_input_dialog;
+/// Device code / browser-based auth overlay (GitHub Copilot, Anthropic OAuth).
+pub mod device_auth_dialog;
 /// Push-to-talk voice capture and Whisper transcription.
 pub mod voice_capture;
 /// Task progress overlay (Ctrl+T) — shows task status with inline toggle.
@@ -114,7 +120,8 @@ pub mod session_branching;
 // Public re-exports
 // ---------------------------------------------------------------------------
 
-pub use app::App;
+pub use app::{App, try_copy_to_clipboard};
+pub use notifications::NotificationKind;
 pub use input::{is_slash_command, parse_slash_command};
 pub use feedback_survey::{FeedbackSurveyState, FeedbackSurveyStage, FeedbackResponse};
 pub use memory_file_selector::{MemoryFileSelectorState, MemoryFile, MemoryFileType};
@@ -135,6 +142,9 @@ pub use session_branching::{SessionBranchingState, BranchBrowserMode, BranchInfo
 pub use invalid_config_dialog::{InvalidConfigDialogState, InvalidConfigKind, render_invalid_config_dialog};
 pub use bypass_permissions_dialog::{BypassPermissionsDialogState, render_bypass_permissions_dialog};
 pub use onboarding_dialog::{OnboardingDialogState, render_onboarding_dialog};
+pub use dialog_select::{DialogSelectState, SelectItem, render_dialog_select};
+pub use key_input_dialog::{KeyInputDialogState, render_key_input_dialog};
+pub use device_auth_dialog::{DeviceAuthDialogState, DeviceAuthStatus, DeviceAuthEvent, render_device_auth_dialog};
 
 // ---------------------------------------------------------------------------
 // Terminal initialization / teardown helpers (public API)
@@ -298,7 +308,7 @@ mod tests {
 
         app.handle_key_event(ctrl(KeyCode::Char('s')));
 
-        let saved = temp.path().join(".claude").join("agents").join("planner.md");
+        let saved = temp.path().join(".claurst").join("agents").join("planner.md");
         assert!(saved.exists());
         let content = std::fs::read_to_string(saved).unwrap();
         assert!(content.contains("name: Planner"));

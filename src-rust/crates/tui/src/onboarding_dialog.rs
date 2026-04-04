@@ -250,11 +250,11 @@ fn render_welcome_page(frame: &mut Frame, area: Rect) {
             Style::default().fg(Color::White),
         )]),
         Line::from(vec![Span::styled(
-            "    • Claude can read, edit, and create files in your project.",
+            "    • Claurst can read, edit, and create files in your project.",
             Style::default().fg(Color::White),
         )]),
         Line::from(vec![Span::styled(
-            "    • Claude can run bash commands, search the web, and more.",
+            "    • Claurst can run bash commands, search the web, and more.",
             Style::default().fg(Color::White),
         )]),
         Line::from(""),
@@ -435,7 +435,7 @@ mod tests {
         let content: String = terminal.backend().buffer().clone().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
-        assert!(content.contains("Welcome") || content.contains("Claude"));
+        assert!(content.contains("Welcome") || content.contains("Claurst"));
     }
 
     #[test]

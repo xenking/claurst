@@ -3,8 +3,8 @@
 //! Styles are applied by injecting `OutputStyleDef::prompt` into the system
 //! prompt.  Built-in styles are defined in code; users can add their own by
 //! placing `.md` or `.json` files in:
-//!   - Global: `~/.claude/output-styles/`
-//!   - Project: `.claude/output-styles/`
+//!   - Global: `~/.claurst/output-styles/`
+//!   - Project: `.claurst/output-styles/`
 //!
 //! Markdown style files have a simple structure:
 //!   Line 1: `# <Label>` (heading becomes the label)
@@ -180,7 +180,7 @@ fn load_style_file(path: &Path) -> Option<OutputStyleDef> {
 /// Return all styles available for `config_dir`:
 /// built-ins first, then styles from `<config_dir>/output-styles/`.
 ///
-/// `config_dir` is typically `~/.claude`.
+/// `config_dir` is typically `~/.claurst`.
 pub fn all_styles(config_dir: &Path) -> Vec<OutputStyleDef> {
     let mut styles = builtin_styles();
     let user_dir = config_dir.join("output-styles");

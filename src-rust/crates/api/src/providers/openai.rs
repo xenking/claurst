@@ -354,6 +354,7 @@ impl OpenAiProvider {
             "max_tokens": request.max_tokens,
             "messages": messages,
             "stream": false,
+            "store": false,
         });
 
         if !tools.is_empty() {
@@ -549,6 +550,7 @@ impl OpenAiProvider {
             "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true },
+            "store": false,
         });
 
         if !tools.is_empty() {

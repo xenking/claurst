@@ -356,8 +356,8 @@ impl Tool for AgentTool {
             provider_registry: None,
             agent_name: None,
             agent_definition: None,
+            model_registry: None,
         };
-
         // -----------------------------------------------------------------------
         // Background mode: spawn and return agent_id immediately.
         // -----------------------------------------------------------------------

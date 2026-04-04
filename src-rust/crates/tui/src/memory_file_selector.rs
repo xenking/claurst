@@ -50,9 +50,9 @@ impl MemoryFileSelectorState {
     /// Open the selector for the given project root.
     ///
     /// Populates the file list with:
-    /// - User:    `~/.claude/CLAUDE.md`
-    /// - Project: `{project_root}/CLAUDE.md`
-    /// - Local:   `{project_root}/.claude/CLAUDE.md`
+    /// - User:    `~/.claurst/AGENTS.md`
+    /// - Project: `{project_root}/AGENTS.md`
+    /// - Local:   `{project_root}/.claurst/AGENTS.md`
     ///
     /// Each entry is marked `exists = true/false` based on the filesystem.
     pub fn open(&mut self, project_root: &std::path::Path) {
@@ -60,8 +60,8 @@ impl MemoryFileSelectorState {
         self.selected = 0;
         self.files.clear();
 
-        // User-level: ~/.claude/CLAUDE.md
-        let user_path = claurst_core::config::Settings::config_dir().join("CLAUDE.md");
+        // User-level: ~/.claurst/AGENTS.md
+        let user_path = claurst_core::config::Settings::config_dir().join("AGENTS.md");
         let user_display = {
             let home = dirs::home_dir().unwrap_or_default();
             let rel = user_path
@@ -76,8 +76,8 @@ impl MemoryFileSelectorState {
             file_type: MemoryFileType::User,
         });
 
-        // Project-level: {project_root}/CLAUDE.md
-        let project_path = project_root.join("CLAUDE.md");
+        // Project-level: {project_root}/AGENTS.md
+        let project_path = project_root.join("AGENTS.md");
         let project_display = project_path.display().to_string();
         self.files.push(MemoryFile {
             exists: project_path.exists(),
@@ -86,8 +86,8 @@ impl MemoryFileSelectorState {
             file_type: MemoryFileType::Project,
         });
 
-        // Local-level: {project_root}/.claude/CLAUDE.md
-        let local_path = project_root.join(".claude").join("CLAUDE.md");
+        // Local-level: {project_root}/.claurst/AGENTS.md
+        let local_path = project_root.join(".claurst").join("AGENTS.md");
         let local_display = local_path.display().to_string();
         self.files.push(MemoryFile {
             exists: local_path.exists(),

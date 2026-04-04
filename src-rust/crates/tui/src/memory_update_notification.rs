@@ -1,8 +1,8 @@
 // memory_update_notification.rs — MemoryUpdateNotification surface.
 //
 // Mirrors src/components/memory/MemoryUpdateNotification.tsx.
-// Shown briefly in the message area when Claude updates a memory file
-// (e.g. ~/.claude/CLAUDE.md or a project-local CLAUDE.md).
+// Shown briefly in the message area when Claurst updates a memory file
+// (e.g. ~/.claurst/AGENTS.md or a project-local AGENTS.md).
 //
 // Displays: "Memory updated in {relative_path} · /memory to edit"
 //
@@ -173,9 +173,9 @@ mod tests {
     fn memory_notif_show_and_dismiss() {
         let mut state = MemoryUpdateNotificationState::new();
         assert!(!state.visible);
-        state.show("/home/user/.claude/CLAUDE.md");
+        state.show("/home/user/.claurst/AGENTS.md");
         assert!(state.visible);
-        assert_eq!(state.memory_path, "/home/user/.claude/CLAUDE.md");
+        assert_eq!(state.memory_path, "/home/user/.claurst/AGENTS.md");
         state.dismiss();
         assert!(!state.visible);
     }
@@ -183,19 +183,19 @@ mod tests {
     #[test]
     fn memory_notif_can_reshown_after_dismiss() {
         let mut state = MemoryUpdateNotificationState::new();
-        state.show("/tmp/CLAUDE.md");
+        state.show("/tmp/AGENTS.md");
         state.dismiss();
         assert!(!state.visible);
-        state.show("/tmp/other/CLAUDE.md");
+        state.show("/tmp/other/AGENTS.md");
         assert!(state.visible);
-        assert_eq!(state.memory_path, "/tmp/other/CLAUDE.md");
+        assert_eq!(state.memory_path, "/tmp/other/AGENTS.md");
     }
 
     #[test]
     fn memory_notif_height() {
         let mut state = MemoryUpdateNotificationState::new();
         assert_eq!(state.height(), 0);
-        state.show("/tmp/CLAUDE.md");
+        state.show("/tmp/AGENTS.md");
         assert_eq!(state.height(), 1);
     }
 
@@ -211,16 +211,16 @@ mod tests {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_else(|_| "/home/testuser".to_string());
-        let path = format!("{}/CLAUDE.md", home);
+        let path = format!("{}/AGENTS.md", home);
         let result = get_relative_memory_path(&path);
         assert!(result.starts_with("~/"), "expected ~/…, got: {result}");
-        assert!(result.contains("CLAUDE.md"));
+        assert!(result.contains("AGENTS.md"));
     }
 
     #[test]
     fn memory_notif_render_smoke() {
         let mut state = MemoryUpdateNotificationState::new();
-        state.show("/home/user/.claude/CLAUDE.md");
+        state.show("/home/user/.claurst/AGENTS.md");
         let area = Rect { x: 0, y: 0, width: 100, height: 4 };
         let mut buf = ratatui::buffer::Buffer::empty(area);
         render_memory_update_notification(&state, area, &mut buf);

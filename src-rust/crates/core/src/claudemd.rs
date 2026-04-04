@@ -1,4 +1,4 @@
-//! CLAUDE.md hierarchical memory loading.
+//! AGENTS.md hierarchical memory loading.
 //! Mirrors src/utils/claudemd.ts (1,479 lines).
 //!
 //! Priority order: managed > user > project > local
@@ -17,17 +17,17 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScope {
-    /// `~/.claude/rules/*.md` — global managed policy.
+    /// `~/.claurst/rules/*.md` — global managed policy.
     Managed,
-    /// `~/.claude/CLAUDE.md` — user-level memory.
+    /// `~/.claurst/AGENTS.md` — user-level memory.
     User,
-    /// `{project_root}/CLAUDE.md` — project-level memory.
+    /// `{project_root}/AGENTS.md` — project-level memory.
     Project,
-    /// `{project_root}/.claude/CLAUDE.md` — local override.
+    /// `{project_root}/.claurst/AGENTS.md` — local override.
     Local,
 }
 
-/// Frontmatter parsed from a CLAUDE.md file.
+/// Frontmatter parsed from a AGENTS.md file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryFrontmatter {
     #[serde(default)]
@@ -179,7 +179,7 @@ pub fn expand_includes(
 
 const MAX_FILE_SIZE: u64 = 40 * 1024; // 40 KB
 
-/// Load a single CLAUDE.md file (respects MAX_FILE_SIZE, expands @includes).
+/// Load a single AGENTS.md file (respects MAX_FILE_SIZE, expands @includes).
 pub fn load_memory_file(path: &Path, scope: MemoryScope) -> Option<MemoryFileInfo> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.len() > MAX_FILE_SIZE {
@@ -203,15 +203,15 @@ pub fn load_memory_file(path: &Path, scope: MemoryScope) -> Option<MemoryFileInf
     })
 }
 
-/// Load all CLAUDE.md files for the given project root, in priority order.
+/// Load all AGENTS.md files for the given project root, in priority order.
 ///
 /// Returned list is ordered: Managed (highest) → User → Project → Local.
 pub fn load_all_memory_files(project_root: &Path) -> Vec<MemoryFileInfo> {
     let mut files = Vec::new();
 
-    // 1. Managed: ~/.claude/rules/*.md
+    // 1. Managed: ~/.claurst/rules/*.md
     if let Some(home) = dirs::home_dir() {
-        let rules_dir = home.join(".claude/rules");
+        let rules_dir = home.join(".claurst/rules");
         if let Ok(entries) = std::fs::read_dir(&rules_dir) {
             let mut paths: Vec<PathBuf> = entries
                 .flatten()
@@ -228,8 +228,8 @@ pub fn load_all_memory_files(project_root: &Path) -> Vec<MemoryFileInfo> {
             }
         }
 
-        // 2. User: ~/.claude/CLAUDE.md
-        let user_claude = home.join(".claude/CLAUDE.md");
+        // 2. User: ~/.claurst/AGENTS.md
+        let user_claude = home.join(".claurst/AGENTS.md");
         if user_claude.exists() {
             if let Some(f) = load_memory_file(&user_claude, MemoryScope::User) {
                 files.push(f);
@@ -237,16 +237,16 @@ pub fn load_all_memory_files(project_root: &Path) -> Vec<MemoryFileInfo> {
         }
     }
 
-    // 3. Project: {project_root}/CLAUDE.md
-    let project_claude = project_root.join("CLAUDE.md");
+    // 3. Project: {project_root}/AGENTS.md
+    let project_claude = project_root.join("AGENTS.md");
     if project_claude.exists() {
         if let Some(f) = load_memory_file(&project_claude, MemoryScope::Project) {
             files.push(f);
         }
     }
 
-    // 4. Local: {project_root}/.claude/CLAUDE.md
-    let local_claude = project_root.join(".claude/CLAUDE.md");
+    // 4. Local: {project_root}/.claurst/AGENTS.md
+    let local_claude = project_root.join(".claurst/AGENTS.md");
     if local_claude.exists() {
         if let Some(f) = load_memory_file(&local_claude, MemoryScope::Local) {
             files.push(f);

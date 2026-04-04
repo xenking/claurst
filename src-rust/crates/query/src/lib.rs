@@ -118,6 +118,9 @@ pub struct QueryConfig {
     pub agent_name: Option<String>,
     /// Resolved agent definition for the current session.
     pub agent_definition: Option<claurst_core::AgentDefinition>,
+    /// Optional shared model registry for dynamic provider and model resolution.
+    /// When set, the query loop uses this instead of constructing a fresh registry.
+    pub model_registry: Option<std::sync::Arc<claurst_api::ModelRegistry>>,
 }
 
 impl Default for QueryConfig {
@@ -142,6 +145,7 @@ impl Default for QueryConfig {
             provider_registry: None,
             agent_name: None,
             agent_definition: None,
+            model_registry: None,
         }
     }
 }
@@ -150,6 +154,26 @@ impl QueryConfig {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             model: cfg.effective_model().to_string(),
+            max_tokens: cfg.effective_max_tokens(),
+            output_style: cfg.effective_output_style(),
+            output_style_prompt: cfg.resolve_output_style_prompt(),
+            working_directory: cfg
+                .project_dir
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Build a QueryConfig using dynamic model resolution from the model registry.
+    ///
+    /// Prefers the best model for the configured provider (from models.dev data)
+    /// over the hardcoded defaults.
+    pub fn from_config_with_registry(cfg: &Config, registry: &claurst_api::ModelRegistry) -> Self {
+        // We can't move the Arc here, but we need a clone for the query loop.
+        // Callers typically wrap the registry in an Arc already.
+        Self {
+            model: claurst_api::effective_model_for_config(cfg, registry),
             max_tokens: cfg.effective_max_tokens(),
             output_style: cfg.effective_output_style(),
             output_style_prompt: cfg.resolve_output_style_prompt(),
@@ -609,18 +633,150 @@ pub async fn run_query_loop(
 
         // Non-Anthropic provider dispatch: if the model is "provider/model"
         // format and the registry has that provider, use it directly.
+        //
+        // Provider resolution priority:
+        //   1. Explicit "provider/model" format in the model string
+        //   2. config.provider setting (from --provider flag or settings.json)
+        //   3. Model registry lookup (e.g. "gemini-3-flash-preview" → google)
+        //   4. Default to "anthropic"
         if let Some(ref registry) = config.provider_registry {
-            // Parse "provider/model" or fall back to config.provider
-            let (provider_id_str, model_id_str) = if let Some((p, m)) = effective_model.split_once('/') {
-                (p, m)
+            let (provider_id_str, model_id_str) = if let Some(p) = tool_ctx.config.provider.as_deref().filter(|p| *p != "anthropic") {
+                // Explicit non-Anthropic provider in config — use it.
+                // If the stored model is in canonical "provider/model" form,
+                // strip the top-level provider prefix before sending it to the
+                // provider adapter. If it contains an additional slash
+                // (e.g. "meta-llama/Llama-3.3..." on OpenRouter), preserve it.
+                let provider_prefix = format!("{}/", p);
+                let model_id = effective_model
+                    .strip_prefix(&provider_prefix)
+                    .unwrap_or(&effective_model)
+                    .to_string();
+                (p.to_string(), model_id)
+            } else if let Some((p, m)) = effective_model.split_once('/') {
+                // No explicit provider but model has "provider/model" format.
+                // Check whether `p` is a known provider or just a model
+                // namespace (e.g. "meta-llama/Llama-3" on OpenRouter).
+                let known_providers = [
+                    "anthropic", "openai", "google", "groq", "mistral",
+                    "deepseek", "xai", "cohere", "perplexity", "cerebras",
+                    "openrouter", "togetherai", "together-ai", "deepinfra",
+                    "venice", "github-copilot", "ollama", "lmstudio",
+                    "llamacpp", "azure", "amazon-bedrock", "huggingface",
+                    "nvidia", "fireworks", "sambanova",
+                ];
+                if known_providers.contains(&p) {
+                    (p.to_string(), m.to_string())
+                } else {
+                    // Treat the whole string as the model ID, fall through
+                    // to auto-detection below.
+                    let fallback_provider = tool_ctx.config.provider.as_deref().unwrap_or("anthropic");
+                    (fallback_provider.to_string(), effective_model.clone())
+                }
             } else {
-                let p = tool_ctx.config.provider.as_deref().unwrap_or("anthropic");
-                (p, effective_model.as_str())
+                // No explicit provider set (or set to "anthropic"): try the
+                // model registry to auto-detect provider from the model name.
+                // Use the shared model registry from QueryConfig if available;
+                // otherwise construct a temporary one.
+                let temp_reg;
+                let model_reg: &claurst_api::ModelRegistry = if let Some(ref shared) = config.model_registry {
+                    shared
+                } else {
+                    temp_reg = {
+                        let mut r = claurst_api::ModelRegistry::new();
+                        if let Some(cache_dir) = dirs::cache_dir() {
+                            let cache_path = cache_dir.join("claurst").join("models_dev.json");
+                            r.load_cache(&cache_path);
+                        }
+                        r
+                    };
+                    &temp_reg
+                };
+                if let Some(detected_pid) = model_reg.find_provider_for_model(&effective_model) {
+                    let pid_str = detected_pid.to_string();
+                    if pid_str != "anthropic" {
+                        (pid_str, effective_model.clone())
+                    } else {
+                        ("anthropic".to_string(), effective_model.clone())
+                    }
+                } else {
+                    // Fall back to config.provider (may be "anthropic" or None→"anthropic")
+                    let p = tool_ctx.config.provider.as_deref().unwrap_or("anthropic");
+                    (p.to_string(), effective_model.clone())
+                }
             };
 
             if provider_id_str != "anthropic" {
-                let pid = claurst_core::provider_id::ProviderId::new(provider_id_str);
-                if let Some(provider) = registry.get(&pid) {
+                let pid = claurst_core::provider_id::ProviderId::new(&provider_id_str);
+                // Try registry first; if not found, build provider dynamically
+                // from auth_store (handles keys added at runtime via /connect).
+                let registry_provider = registry.get(&pid).cloned();
+                let dynamic_provider: Option<std::sync::Arc<dyn claurst_api::LlmProvider>> = if registry_provider.is_none() {
+                    let auth_store = claurst_core::AuthStore::load();
+                    if let Some(key) = auth_store.api_key_for(&provider_id_str) {
+                        if !key.is_empty() {
+                            match provider_id_str.as_str() {
+                                "openai" => Some(std::sync::Arc::new(claurst_api::OpenAiProvider::new(key))),
+                                "google" => Some(std::sync::Arc::new(claurst_api::GoogleProvider::new(key))),
+                                "github-copilot" => Some(std::sync::Arc::new(claurst_api::CopilotProvider::new(key))),
+                                "cohere" => {
+                                    if let Some(p) = claurst_api::CohereProvider::from_env() {
+                                        Some(std::sync::Arc::new(p))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => {
+                                    // Use the factory functions that include correct provider quirks
+                                    // (e.g. Mistral tool_id_max_len=9, DeepSeek reasoning_field).
+                                    // The factory reads an env var for the key, but .with_api_key()
+                                    // below replaces it with the runtime-provided key.
+                                    use claurst_api::providers::openai_compat_providers;
+                                    let provider = match provider_id_str.as_str() {
+                                        "groq" => openai_compat_providers::groq().with_api_key(key),
+                                        "mistral" => openai_compat_providers::mistral().with_api_key(key),
+                                        "deepseek" => openai_compat_providers::deepseek().with_api_key(key),
+                                        "xai" => openai_compat_providers::xai().with_api_key(key),
+                                        "openrouter" => openai_compat_providers::openrouter().with_api_key(key),
+                                        "togetherai" | "together-ai" => openai_compat_providers::together_ai().with_api_key(key),
+                                        "perplexity" => openai_compat_providers::perplexity().with_api_key(key),
+                                        "cerebras" => openai_compat_providers::cerebras().with_api_key(key),
+                                        "deepinfra" => openai_compat_providers::deepinfra().with_api_key(key),
+                                        "venice" => openai_compat_providers::venice().with_api_key(key),
+                                        "huggingface" => openai_compat_providers::huggingface().with_api_key(key),
+                                        "nvidia" => openai_compat_providers::nvidia().with_api_key(key),
+                                        "siliconflow" => openai_compat_providers::siliconflow().with_api_key(key),
+                                        "sambanova" => openai_compat_providers::sambanova().with_api_key(key),
+                                        "moonshot" => openai_compat_providers::moonshot().with_api_key(key),
+                                        "zhipu" => openai_compat_providers::zhipu().with_api_key(key),
+                                        "qwen" => openai_compat_providers::qwen().with_api_key(key),
+                                        "nebius" => openai_compat_providers::nebius().with_api_key(key),
+                                        "novita" => openai_compat_providers::novita().with_api_key(key),
+                                        "ovhcloud" => openai_compat_providers::ovhcloud().with_api_key(key),
+                                        "scaleway" => openai_compat_providers::scaleway().with_api_key(key),
+                                        "vultr" | "vultr-ai" => openai_compat_providers::vultr_ai().with_api_key(key),
+                                        "baseten" => openai_compat_providers::baseten().with_api_key(key),
+                                        "friendli" => openai_compat_providers::friendli().with_api_key(key),
+                                        "upstage" => openai_compat_providers::upstage().with_api_key(key),
+                                        "stepfun" => openai_compat_providers::stepfun().with_api_key(key),
+                                        "fireworks" => openai_compat_providers::fireworks().with_api_key(key),
+                                        "ollama" => openai_compat_providers::ollama(),
+                                        "lmstudio" | "lm-studio" => openai_compat_providers::lm_studio(),
+                                        "llamacpp" | "llama-cpp" => openai_compat_providers::llama_cpp(),
+                                        _ => {
+                                            // True fallback: unknown provider, generic OpenAI-compatible
+                                            claurst_api::OpenAiCompatProvider::new(&provider_id_str, &provider_id_str, "https://api.openai.com/v1")
+                                                .with_api_key(key)
+                                        }
+                                    };
+                                    Some(std::sync::Arc::new(provider))
+                                }
+                            }
+                        } else { None }
+                    } else { None }
+                } else { None };
+
+                let provider = registry_provider.or(dynamic_provider);
+                if let Some(provider) = provider {
                     debug!(provider = %provider_id_str, model = %model_id_str, "Dispatching to non-Anthropic provider");
 
                     // Notify TUI that we're calling the provider
@@ -634,9 +790,39 @@ pub async fn run_query_loop(
                         .iter()
                         .map(|t| t.to_definition())
                         .collect();
+
+                    // Filter unsupported modalities: replace Image/Document blocks
+                    // with placeholder text when the provider doesn't support them,
+                    // preventing crashes on text-only models.
+                    let caps = provider.capabilities();
+                    let provider_messages: Vec<claurst_core::types::Message> = messages
+                        .iter()
+                        .map(|msg| {
+                            let mut msg = msg.clone();
+                            if let claurst_core::types::MessageContent::Blocks(ref mut blocks) = msg.content {
+                                for block in blocks.iter_mut() {
+                                    match block {
+                                        claurst_core::types::ContentBlock::Image { .. } if !caps.image_input => {
+                                            *block = claurst_core::types::ContentBlock::Text {
+                                                text: "[Image not supported by this model]".to_string(),
+                                            };
+                                        }
+                                        claurst_core::types::ContentBlock::Document { .. } if !caps.pdf_input => {
+                                            *block = claurst_core::types::ContentBlock::Text {
+                                                text: "[PDF not supported by this model]".to_string(),
+                                            };
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            msg
+                        })
+                        .collect();
+
                     let provider_request = claurst_api::ProviderRequest {
                         model: model_id_str.to_owned(),
-                        messages: messages.clone(),
+                        messages: provider_messages,
                         system_prompt: Some(system_for_provider.clone()),
                         tools: provider_tools,
                         max_tokens: config.max_tokens,
@@ -806,6 +992,32 @@ pub async fn run_query_loop(
                         message: assistant_msg,
                         usage,
                     };
+                } else {
+                    // Non-Anthropic provider detected but no API key / credentials
+                    // available.  Return a clear error instead of silently falling
+                    // through to the Anthropic client.
+                    let hint = match provider_id_str.as_str() {
+                        "google" => "Set GOOGLE_API_KEY or run `claurst auth login --provider google`.",
+                        "openai" => "Set OPENAI_API_KEY or run `claurst auth login --provider openai`.",
+                        "groq" => "Set GROQ_API_KEY.",
+                        "mistral" => "Set MISTRAL_API_KEY.",
+                        "deepseek" => "Set DEEPSEEK_API_KEY.",
+                        "xai" => "Set XAI_API_KEY.",
+                        "github-copilot" => "Set GITHUB_TOKEN.",
+                        "cohere" => "Set COHERE_API_KEY.",
+                        _ => "Set the appropriate API key environment variable or use `claurst auth login`.",
+                    };
+                    error!(
+                        provider = %provider_id_str,
+                        model = %model_id_str,
+                        "No credentials found for provider"
+                    );
+                    return QueryOutcome::Error(
+                        ClaudeError::Api(format!(
+                            "No API key for provider '{}' (model '{}'). {}",
+                            provider_id_str, model_id_str, hint
+                        ))
+                    );
                 }
             }
         }
@@ -1111,8 +1323,8 @@ pub async fn run_query_loop(
                                     {
                                         Ok(memories) if !memories.is_empty() => {
                                             let target = working_dir_clone
-                                                .join(".claude")
-                                                .join("CLAUDE.md");
+                                                .join(".claurst")
+                                                .join("AGENTS.md");
                                             if let Err(e) =
                                                 session_memory::SessionMemoryExtractor::persist(
                                                     &memories, &target,
@@ -1145,9 +1357,9 @@ pub async fn run_query_loop(
                 // the spawn doesn't call run_query_loop recursively from within
                 // its own future (which would make the future !Send).
                 {
-                    let memory_dir = dirs::home_dir().map(|h| h.join(".claude").join("memory"));
+                    let memory_dir = dirs::home_dir().map(|h| h.join(".claurst").join("memory"));
                     let conversations_dir =
-                        dirs::home_dir().map(|h| h.join(".claude").join("conversations"));
+                        dirs::home_dir().map(|h| h.join(".claurst").join("conversations"));
                     if let (Some(mem), Some(conv)) = (memory_dir, conversations_dir) {
                         let dreamer = crate::auto_dream::AutoDream::new(mem, conv);
                         if let Ok(Some(task)) = dreamer.maybe_trigger().await {

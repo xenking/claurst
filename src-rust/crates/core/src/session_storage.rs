@@ -1,6 +1,6 @@
 // session_storage.rs — JSONL transcript persistence for Claurst.
 //
-// File layout:  ~/.claude/projects/{base64url(project_root)}/{session_id}.jsonl
+// File layout:  ~/.claurst/projects/{base64url(project_root)}/{session_id}.jsonl
 //
 // Each line is a JSON object ("entry") whose `type` field is the discriminant.
 // The schema is kept compatible with the TypeScript `Entry` union in
@@ -209,7 +209,7 @@ pub struct SessionSummary {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Returns the base projects directory: `~/.claude/projects/`.
+/// Returns the base projects directory: `~/.claurst/projects/`.
 pub fn projects_dir() -> PathBuf {
     crate::config::Settings::config_dir().join("projects")
 }

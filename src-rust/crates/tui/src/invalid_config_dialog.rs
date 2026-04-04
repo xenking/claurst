@@ -1,4 +1,4 @@
-// invalid_config_dialog.rs — Startup dialog for malformed settings.json or CLAUDE.md.
+// invalid_config_dialog.rs — Startup dialog for malformed settings.json or AGENTS.md.
 //
 // Mirrors TS `InvalidConfigDialog` / `InvalidSettingsDialog`:
 // - Displayed on startup when config parsing fails.
@@ -54,7 +54,7 @@ impl InvalidConfigDialogState {
         }
     }
 
-    /// Show the dialog with a CLAUDE.md parse error.
+    /// Show the dialog with a AGENTS.md parse error.
     pub fn show_claude_md_error(error: &str) -> Self {
         Self {
             visible: true,
@@ -102,7 +102,7 @@ pub fn render_invalid_config_dialog(
 
     let title = match state.kind {
         InvalidConfigKind::Settings => " Invalid Settings ",
-        InvalidConfigKind::ClaudeMd => " Invalid CLAUDE.md ",
+        InvalidConfigKind::ClaudeMd => " Invalid AGENTS.md ",
         InvalidConfigKind::Generic => " Configuration Error ",
     };
 
@@ -122,8 +122,8 @@ pub fn render_invalid_config_dialog(
 
     // Subtitle
     let subtitle = match state.kind {
-        InvalidConfigKind::Settings => "~/.claude/settings.json could not be parsed.",
-        InvalidConfigKind::ClaudeMd => "CLAUDE.md could not be parsed.",
+        InvalidConfigKind::Settings => "~/.claurst/settings.json could not be parsed.",
+        InvalidConfigKind::ClaudeMd => "AGENTS.md could not be parsed.",
         InvalidConfigKind::Generic => "A configuration file could not be parsed.",
     };
     lines.push(Line::from(vec![Span::styled(
@@ -152,12 +152,12 @@ pub fn render_invalid_config_dialog(
     )]));
     let instructions = match state.kind {
         InvalidConfigKind::Settings => vec![
-            "  1. Open ~/.claude/settings.json in a text editor.",
+            "  1. Open ~/.claurst/settings.json in a text editor.",
             "  2. Fix the JSON syntax error shown above.",
             "  3. Restart Claurst.",
         ],
         InvalidConfigKind::ClaudeMd => vec![
-            "  1. Open the CLAUDE.md file shown above in a text editor.",
+            "  1. Open the AGENTS.md file shown above in a text editor.",
             "  2. Fix the syntax error.",
             "  3. Restart Claurst.",
         ],

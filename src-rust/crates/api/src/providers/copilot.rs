@@ -4,13 +4,17 @@
 // routing headers.
 //
 // Chat Completions: POST https://api.githubcopilot.com/chat/completions
-// Responses API (GPT-5+): POST https://api.githubcopilot.com/responses
 //
-// Required headers on every request:
+// Copilot also exposes a Responses API, but Claurst currently keeps Copilot on
+// Chat Completions until Responses request/stream normalization is implemented
+// end-to-end. This mirrors the OpenCode header/auth path while avoiding the
+// broken hybrid /responses payload we previously sent.
+//
+// Required headers on model/chat requests:
 //   Authorization: Bearer <github_token>
-//   Editor-Version: Claurst/0.0.6
-//   Editor-Plugin-Version: claurst/0.0.6
-//   Copilot-Integration-Id: claurst
+//   User-Agent: claurst/0.0.6
+//   Openai-Intent: conversation-edits
+//   x-initiator: user | agent
 //
 // Env: GITHUB_TOKEN
 
@@ -19,7 +23,7 @@ use std::pin::Pin;
 use async_stream::stream;
 use async_trait::async_trait;
 use claurst_core::provider_id::{ModelId, ProviderId};
-use claurst_core::types::{ContentBlock, UsageInfo};
+use claurst_core::types::{ContentBlock, MessageContent, Role, ToolResultContent, UsageInfo};
 use futures::Stream;
 use serde_json::{json, Value};
 use tracing::debug;
@@ -65,35 +69,88 @@ impl CopilotProvider {
         "https://api.githubcopilot.com"
     }
 
-    /// GPT-5+ and O-series models use the Responses API; everything else uses
-    /// Chat Completions.
-    fn use_responses_api(model: &str) -> bool {
-        // Parse the major version number from "gpt-N..." patterns.
-        let ver: u32 = model
-            .trim_start_matches("gpt-")
-            .split('-')
-            .next()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        (ver >= 5 && !model.contains("mini"))
-            || model.starts_with("o3")
-            || model.starts_with("o4")
+    fn block_has_image(block: &ContentBlock) -> bool {
+        match block {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ToolResult { content, .. } => match content {
+                ToolResultContent::Text(_) => false,
+                ToolResultContent::Blocks(blocks) => blocks.iter().any(Self::block_has_image),
+            },
+            _ => false,
+        }
     }
 
-    /// Add the required Copilot-specific headers to a request builder.
-    fn copilot_headers(
-        &self,
-        builder: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder {
+    fn message_has_image(content: &MessageContent) -> bool {
+        match content {
+            MessageContent::Text(_) => false,
+            MessageContent::Blocks(blocks) => blocks.iter().any(Self::block_has_image),
+        }
+    }
+
+    fn request_has_image(request: &ProviderRequest) -> bool {
+        request
+            .messages
+            .iter()
+            .any(|message| Self::message_has_image(&message.content))
+    }
+
+    fn request_initiator(request: &ProviderRequest) -> &'static str {
+        match request.messages.last() {
+            Some(message) if message.role == Role::User => "user",
+            _ => "agent",
+        }
+    }
+
+    fn copilot_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         builder
             .bearer_auth(&self.token)
-            .header("Editor-Version", "Claurst/0.0.6")
-            .header("Editor-Plugin-Version", "claurst/0.0.6")
-            .header("Copilot-Integration-Id", "claurst")
+            .header("User-Agent", "claurst/0.0.6")
+    }
+
+    fn copilot_request_headers(
+        &self,
+        builder: reqwest::RequestBuilder,
+        request: &ProviderRequest,
+    ) -> reqwest::RequestBuilder {
+        let builder = self
+            .copilot_headers(builder)
+            .header("Openai-Intent", "conversation-edits")
+            .header("x-initiator", Self::request_initiator(request));
+
+        if Self::request_has_image(request) {
+            builder.header("Copilot-Vision-Request", "true")
+        } else {
+            builder
+        }
+    }
+
+    fn merge_provider_options(body: &mut Value, provider_options: &Value) {
+        if let Some(options) = provider_options.as_object() {
+            for (key, value) in options {
+                body[key] = value.clone();
+            }
+        }
     }
 
     fn map_http_error(&self, status: u16, body: &str) -> ProviderError {
         parse_error_response(status, body, &self.id)
+    }
+
+    /// Hardcoded fallback model list used when the /models endpoint is
+    /// unreachable or returns empty data.
+    fn hardcoded_models(provider_id: &ProviderId) -> Vec<ModelInfo> {
+        vec![
+            ModelInfo { id: ModelId::new("claude-sonnet-4.6"), provider_id: provider_id.clone(), name: "Claude Sonnet 4.6 (Copilot)".into(), context_window: 128_000, max_output_tokens: 32_000 },
+            ModelInfo { id: ModelId::new("claude-sonnet-4.5"), provider_id: provider_id.clone(), name: "Claude Sonnet 4.5 (Copilot)".into(), context_window: 128_000, max_output_tokens: 32_000 },
+            ModelInfo { id: ModelId::new("claude-haiku-4.5"), provider_id: provider_id.clone(), name: "Claude Haiku 4.5 (Copilot)".into(), context_window: 128_000, max_output_tokens: 32_000 },
+            ModelInfo { id: ModelId::new("gpt-4.1"), provider_id: provider_id.clone(), name: "GPT-4.1 (Copilot)".into(), context_window: 64_000, max_output_tokens: 16_384 },
+            ModelInfo { id: ModelId::new("gpt-4o"), provider_id: provider_id.clone(), name: "GPT-4o (Copilot)".into(), context_window: 128_000, max_output_tokens: 16_384 },
+            ModelInfo { id: ModelId::new("gpt-4o-mini"), provider_id: provider_id.clone(), name: "GPT-4o Mini (Copilot)".into(), context_window: 128_000, max_output_tokens: 16_384 },
+            ModelInfo { id: ModelId::new("gpt-5-mini"), provider_id: provider_id.clone(), name: "GPT-5 Mini (Copilot)".into(), context_window: 128_000, max_output_tokens: 128_000 },
+            ModelInfo { id: ModelId::new("o3-mini"), provider_id: provider_id.clone(), name: "o3-mini (Copilot)".into(), context_window: 200_000, max_output_tokens: 100_000 },
+            ModelInfo { id: ModelId::new("o4-mini"), provider_id: provider_id.clone(), name: "o4-mini (Copilot)".into(), context_window: 200_000, max_output_tokens: 100_000 },
+            ModelInfo { id: ModelId::new("gemini-3-flash-preview"), provider_id: provider_id.clone(), name: "Gemini 3 Flash (Copilot)".into(), context_window: 128_000, max_output_tokens: 64_000 },
+        ]
     }
 
     async fn send_non_streaming(
@@ -111,6 +168,7 @@ impl CopilotProvider {
             "max_tokens": request.max_tokens,
             "messages": messages,
             "stream": false,
+            "store": false,
         });
 
         if !tools.is_empty() {
@@ -125,18 +183,15 @@ impl CopilotProvider {
         if !request.stop_sequences.is_empty() {
             body["stop"] = json!(request.stop_sequences);
         }
+        Self::merge_provider_options(&mut body, &request.provider_options);
 
-        let url = if Self::use_responses_api(&request.model) {
-            format!("{}/responses", Self::base_url())
-        } else {
-            format!("{}/chat/completions", Self::base_url())
-        };
+        let url = format!("{}/chat/completions", Self::base_url());
 
         let builder = self
             .http_client
             .post(&url)
             .header("Content-Type", "application/json");
-        let builder = self.copilot_headers(builder);
+        let builder = self.copilot_request_headers(builder, request);
 
         let resp = builder
             .json(&body)
@@ -187,6 +242,7 @@ impl CopilotProvider {
             "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true },
+            "store": false,
         });
 
         if !tools.is_empty() {
@@ -201,19 +257,16 @@ impl CopilotProvider {
         if !request.stop_sequences.is_empty() {
             body["stop"] = json!(request.stop_sequences);
         }
+        Self::merge_provider_options(&mut body, &request.provider_options);
 
-        let url = if Self::use_responses_api(&request.model) {
-            format!("{}/responses", Self::base_url())
-        } else {
-            format!("{}/chat/completions", Self::base_url())
-        };
+        let url = format!("{}/chat/completions", Self::base_url());
 
         let builder = self
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream");
-        let builder = self.copilot_headers(builder);
+        let builder = self.copilot_request_headers(builder, request);
 
         let resp = builder
             .json(&body)
@@ -470,36 +523,99 @@ impl LlmProvider for CopilotProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        Ok(vec![
-            ModelInfo {
-                id: ModelId::new("gpt-4o"),
-                provider_id: self.id.clone(),
-                name: "GPT-4o (Copilot)".to_string(),
-                context_window: 128_000,
-                max_output_tokens: 16_384,
-            },
-            ModelInfo {
-                id: ModelId::new("gpt-4o-mini"),
-                provider_id: self.id.clone(),
-                name: "GPT-4o Mini (Copilot)".to_string(),
-                context_window: 128_000,
-                max_output_tokens: 16_384,
-            },
-            ModelInfo {
-                id: ModelId::new("claude-sonnet-4-6"),
-                provider_id: self.id.clone(),
-                name: "Claude Sonnet 4.6 (Copilot)".to_string(),
-                context_window: 200_000,
-                max_output_tokens: 16_000,
-            },
-            ModelInfo {
-                id: ModelId::new("o3-mini"),
-                provider_id: self.id.clone(),
-                name: "o3-mini (Copilot)".to_string(),
-                context_window: 200_000,
-                max_output_tokens: 100_000,
-            },
-        ])
+        // Try to fetch the live model list from the Copilot API.
+        let url = format!("{}/models", Self::base_url());
+        let builder = self.http_client.get(&url);
+        let builder = self.copilot_headers(builder)
+            .header("Accept", "application/json");
+
+        let resp = builder.send().await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let text = r.text().await.map_err(|e| ProviderError::Other {
+                    provider: self.id.clone(),
+                    message: e.to_string(),
+                    status: None,
+                    body: None,
+                })?;
+                let json: Value = serde_json::from_str(&text).map_err(|e| ProviderError::Other {
+                    provider: self.id.clone(),
+                    message: format!("Failed to parse models JSON: {}", e),
+                    status: None,
+                    body: Some(text.clone()),
+                })?;
+
+                let mut models = Vec::new();
+
+                // The Copilot /models endpoint may return { "data": [...] } or
+                // a top-level array.
+                let items: Option<&Vec<Value>> = json
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .or_else(|| json.as_array());
+
+                if let Some(arr) = items {
+                    for item in arr {
+                        if item
+                            .get("model_picker_enabled")
+                            .and_then(|v| v.as_bool())
+                            == Some(false)
+                        {
+                            continue;
+                        }
+                        if let Some(endpoints) =
+                            item.get("supported_endpoints").and_then(|v| v.as_array())
+                        {
+                            let supports_chat = endpoints.iter().any(|endpoint| {
+                                endpoint
+                                    .as_str()
+                                    .map(|value| value.contains("chat/completions"))
+                                    .unwrap_or(false)
+                            });
+                            if !supports_chat {
+                                continue;
+                            }
+                        }
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                            let name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(id);
+                            let ctx = item
+                                .get("context_window")
+                                .or_else(|| item.get("capabilities").and_then(|c| c.get("limits").and_then(|l| l.get("max_context_window_tokens"))))
+                                .or_else(|| item.get("capabilities").and_then(|c| c.get("limits").and_then(|l| l.get("max_prompt_tokens"))))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(128_000) as u32;
+                            let max_out = item
+                                .get("max_output_tokens")
+                                .or_else(|| item.get("capabilities").and_then(|c| c.get("limits").and_then(|l| l.get("max_output_tokens"))))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(16_384) as u32;
+                            models.push(ModelInfo {
+                                id: ModelId::new(id),
+                                provider_id: self.id.clone(),
+                                name: name.to_string(),
+                                context_window: ctx,
+                                max_output_tokens: max_out,
+                            });
+                        }
+                    }
+                }
+
+                if !models.is_empty() {
+                    Ok(models)
+                } else {
+                    // API returned but no usable models — fall back to hardcoded.
+                    Ok(Self::hardcoded_models(&self.id))
+                }
+            }
+            _ => {
+                // Network error or non-success status — fall back to hardcoded.
+                Ok(Self::hardcoded_models(&self.id))
+            }
+        }
     }
 
     async fn health_check(&self) -> Result<ProviderStatus, ProviderError> {

@@ -53,6 +53,22 @@ impl ProviderId {
     pub const CLOUDFLARE: &'static str = "cloudflare";
     pub const VENICE: &'static str = "venice";
     pub const SAP: &'static str = "sap";
+    pub const SAMBANOVA: &'static str = "sambanova";
+    pub const HUGGINGFACE: &'static str = "huggingface";
+    pub const NVIDIA: &'static str = "nvidia";
+    pub const SILICONFLOW: &'static str = "siliconflow";
+    pub const MOONSHOT: &'static str = "moonshotai";
+    pub const ZHIPU: &'static str = "zhipuai";
+    pub const NEBIUS: &'static str = "nebius";
+    pub const OVHCLOUD: &'static str = "ovhcloud";
+    pub const SCALEWAY: &'static str = "scaleway";
+    pub const VULTR: &'static str = "vultr";
+    pub const BASETEN: &'static str = "baseten";
+    pub const FRIENDLI: &'static str = "friendli";
+    pub const UPSTAGE: &'static str = "upstage";
+    pub const STEPFUN: &'static str = "stepfun";
+    pub const FIREWORKS: &'static str = "fireworks";
+    pub const NOVITA: &'static str = "novita";
 }
 
 impl fmt::Display for ProviderId {

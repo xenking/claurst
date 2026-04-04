@@ -21,6 +21,9 @@ use crate::memory_update_notification::render_memory_update_notification;
 use crate::invalid_config_dialog::render_invalid_config_dialog;
 use crate::bypass_permissions_dialog::render_bypass_permissions_dialog;
 use crate::onboarding_dialog::render_onboarding_dialog;
+use crate::dialog_select::render_dialog_select;
+use crate::key_input_dialog::render_key_input_dialog;
+use crate::device_auth_dialog::render_device_auth_dialog;
 use crate::elicitation_dialog::render_elicitation_dialog;
 use crate::figures;
 use crate::hooks_config_menu::render_hooks_config_menu;
@@ -346,7 +349,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     } else {
         0
     };
-    let prompt_height = input_height(&app.prompt_input);
+    let prompt_height = input_height(&app.prompt_input) + 1; // +1 for model/mode status line
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -366,6 +369,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_status_row(frame, app, chunks[2]);
     }
     render_input(frame, app, chunks[3], prompt_focused);
+    app.last_input_area.set(chunks[3]);
     if suggestions_height > 0 {
         render_prompt_suggestions(frame, app, chunks[4]);
     }
@@ -495,7 +499,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
         render_desktop_upsell_startup(&app.desktop_upsell, size, frame.buffer_mut());
     }
 
-    // Invalid config/settings dialog (shown when settings.json or CLAUDE.md is malformed)
+    // Invalid config/settings dialog (shown when settings.json or AGENTS.md is malformed)
     if app.invalid_config_dialog.visible {
         render_invalid_config_dialog(frame, &app.invalid_config_dialog, size);
     }
@@ -508,6 +512,26 @@ pub fn render_app(frame: &mut Frame, app: &App) {
     // First-launch onboarding dialog (shown after bypass dialog, below elicitation)
     if app.onboarding_dialog.visible {
         render_onboarding_dialog(frame, &app.onboarding_dialog, size);
+    }
+
+    // Connect-a-provider dialog (/connect command)
+    if app.connect_dialog.visible {
+        render_dialog_select(frame, &app.connect_dialog, size);
+    }
+
+    // API key input dialog (opened from /connect for key-based providers)
+    if app.key_input_dialog.visible {
+        render_key_input_dialog(frame, &app.key_input_dialog, size);
+    }
+
+    // Device code / browser auth dialog (GitHub Copilot, Anthropic OAuth)
+    if app.device_auth_dialog.visible {
+        render_device_auth_dialog(frame, &app.device_auth_dialog, size);
+    }
+
+    // Ctrl+K command palette
+    if app.command_palette.visible {
+        render_dialog_select(frame, &app.command_palette, size);
     }
 
     // MCP elicitation dialog (highest priority modal — rendered last to sit on top)
@@ -659,6 +683,7 @@ fn render_context_menu(frame: &mut Frame, app: &App) {
             ("Cut", !app.selection_text.borrow().is_empty()),
             ("Select All", true),
             ("Clear", app.selection_anchor.is_some()),
+            ("Fork here", !app.messages.is_empty()),
         ];
 
         let menu_height = (items.len() as u16).min(15); // Limit to 15 items max
@@ -849,7 +874,22 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
 
     list.render(msg_area, frame.buffer_mut());
 
-    // "â†“ N new messages" indicator when scrolled up and new messages arrived.
+    // Scrollbar: show only when content overflows the viewport.
+    if content_height > visible_height {
+        use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+        let mut scrollbar_state = ScrollbarState::new(content_height as usize)
+            .position(scroll)
+            .viewport_content_length(visible_height as usize);
+
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(Color::Rgb(233, 30, 99)))  // pink thumb
+            .track_style(Style::default().fg(Color::Rgb(40, 40, 50)));  // dark track
+
+        frame.render_stateful_widget(scrollbar, msg_area, &mut scrollbar_state);
+    }
+
+    // “â†” N new messages” indicator when scrolled up and new messages arrived.
     if app.new_messages_while_scrolled > 0 && msg_area.height > 4 && msg_area.width > 20 {
         let indicator = format!(
             " \u{2193} {} new message{} ",
@@ -1090,19 +1130,6 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         "Welcome back!".to_string()
     };
     let rustle = rustle_lines(&RustlePose::Default);
-    // Show provider prefix for non-Anthropic models: "gpt-4o [openai]"
-    // Bare Anthropic model names are shown as-is (Anthropic is the default).
-    let model_display = if let Some((provider, model)) = app.model_name.split_once('/') {
-        if provider == "anthropic" {
-            model.to_string()
-        } else {
-            format!("{} [{}]", model, provider)
-        }
-    } else {
-        app.model_name.clone()
-    };
-    let model_line = format!("{} \u{00b7} API Usage Billing", model_display);
-
     let mut left_lines: Vec<Line> = Vec::new();
     left_lines.push(Line::from(Span::styled(
         welcome_msg,
@@ -1118,10 +1145,22 @@ fn render_welcome_box(frame: &mut Frame, app: &App, area: Rect) {
         left_lines.push(Line::from(spans));
     }
     left_lines.push(Line::from(""));
-    left_lines.push(Line::from(Span::styled(
-        model_line,
-        Style::default().fg(Color::DarkGray),
-    )));
+    // Only show model line if credentials are configured
+    if app.has_credentials {
+        let model_display = if let Some((provider, model)) = app.model_name.split_once('/') {
+            if provider == "anthropic" {
+                model.to_string()
+            } else {
+                format!("{} [{}]", model, provider)
+            }
+        } else {
+            app.model_name.clone()
+        };
+        left_lines.push(Line::from(Span::styled(
+            format!("{} \u{00b7} API Usage", model_display),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     left_lines.push(Line::from(Span::styled(
         cwd,
         Style::default().fg(Color::DarkGray),
@@ -1369,9 +1408,58 @@ fn render_tool_block_lines(lines: &mut Vec<Line<'static>>, block: &crate::app::T
 // -----------------------------------------------------------------------
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect, focused: bool) {
+    // Split: 1-row model/mode status line + remaining rows for the prompt input.
+    let (status_area, input_area) = if area.height > 2 {
+        let splits = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        (Some(splits[0]), splits[1])
+    } else {
+        // Not enough room for the extra line — skip the status row.
+        (None, area)
+    };
+
+    // Render model + agent mode status line above the prompt.
+    if let Some(status_area) = status_area {
+        let agent_mode = match app.agent_mode.as_deref() {
+            Some(m) => m,
+            None if app.plan_mode => "plan",
+            _ => "build",
+        };
+
+        let pink = Color::Rgb(233, 30, 99);
+        let dim = Color::Rgb(80, 80, 80);
+
+        let status_line = if app.has_credentials {
+            // Show model (strip provider prefix for compact display).
+            let model_short = if let Some((_, model)) = app.model_name.split_once('/') {
+                model
+            } else {
+                &app.model_name
+            };
+            Line::from(vec![
+                Span::styled(format!(" {} ", model_short), Style::default().fg(Color::White)),
+                Span::styled("\u{00b7}", Style::default().fg(dim)),
+                Span::styled(format!(" {} ", agent_mode), Style::default().fg(pink)),
+                Span::styled("\u{00b7}", Style::default().fg(dim)),
+                Span::styled(" Ctrl+A: model  Ctrl+K: commands", Style::default().fg(dim)),
+            ])
+        } else {
+            // No credentials — show hint instead of a stale model name
+            Line::from(vec![
+                Span::styled(" /connect", Style::default().fg(pink)),
+                Span::styled(" to set up a provider", Style::default().fg(dim)),
+                Span::styled("  \u{00b7}  ", Style::default().fg(dim)),
+                Span::styled("Ctrl+K: commands", Style::default().fg(dim)),
+            ])
+        };
+        frame.render_widget(Paragraph::new(vec![status_line]), status_area);
+    }
+
     render_prompt_input(
         &app.prompt_input,
-        area,
+        input_area,
         frame.buffer_mut(),
         focused,
         if app.is_streaming {

@@ -2,7 +2,7 @@
 //
 // Port of src/services/settingsSync/index.ts
 //
-// Syncs user settings and CLAUDE.md memory files between a local Claurst
+// Syncs user settings and AGENTS.md memory files between a local Claurst
 // installation and claude.ai via:
 //   - Upload (interactive CLI, fire-and-forget at startup)
 //   - Download (CCR / CLAURST_REMOTE=1, blocking before plugin load)
@@ -36,18 +36,18 @@ const MAX_FILE_SIZE_BYTES: u64 = 500 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Canonical sync key for the global user settings file.
-pub const SYNC_KEY_USER_SETTINGS: &str = "~/.claude/settings.json";
+pub const SYNC_KEY_USER_SETTINGS: &str = "~/.claurst/settings.json";
 /// Canonical sync key for the global user memory file.
-pub const SYNC_KEY_USER_MEMORY: &str = "~/.claude/CLAUDE.md";
+pub const SYNC_KEY_USER_MEMORY: &str = "~/.claurst/AGENTS.md";
 
 /// Canonical sync key for per-project settings (keyed by git-remote hash).
 pub fn sync_key_project_settings(project_id: &str) -> String {
-    format!("projects/{project_id}/.claude/settings.local.json")
+    format!("projects/{project_id}/.claurst/settings.local.json")
 }
 
 /// Canonical sync key for per-project memory (keyed by git-remote hash).
 pub fn sync_key_project_memory(project_id: &str) -> String {
-    format!("projects/{project_id}/CLAUDE.local.md")
+    format!("projects/{project_id}/AGENTS.local.md")
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ impl SettingsSyncManager {
 
         // Global user memory
         if let Some(memory) = data.memory_files.get(SYNC_KEY_USER_MEMORY) {
-            let path = claude_config_dir().join("CLAUDE.md");
+            let path = claude_config_dir().join("AGENTS.md");
             match write_file_for_sync(&path, memory).await {
                 Ok(()) => {
                     result.memory_written = true;
@@ -239,7 +239,7 @@ impl SettingsSyncManager {
             if let Some(content) = data.memory_files.get(&proj_settings_key) {
                 let path = std::env::current_dir()
                     .unwrap_or_default()
-                    .join(".claude")
+                    .join(".claurst")
                     .join("settings.local.json");
                 match write_file_for_sync(&path, content).await {
                     Ok(()) => {
@@ -256,7 +256,7 @@ impl SettingsSyncManager {
             if let Some(content) = data.memory_files.get(&proj_memory_key) {
                 let path = std::env::current_dir()
                     .unwrap_or_default()
-                    .join("CLAUDE.local.md");
+                    .join("AGENTS.local.md");
                 match write_file_for_sync(&path, content).await {
                     Ok(()) => {
                         result.memory_written = true;
@@ -327,7 +327,7 @@ impl SettingsSyncManager {
     /// Spawn a fire-and-forget upload task. Errors are logged but not propagated.
     ///
     /// Call this right after auth is established.  The task will:
-    ///   1. Read local settings and CLAUDE.md files
+    ///   1. Read local settings and AGENTS.md files
     ///   2. Fetch current remote state for diffing
     ///   3. Upload only changed entries
     pub fn upload_in_background(token: String, base_url: String) {
@@ -376,8 +376,8 @@ fn entries_to_synced_data(entries: HashMap<String, String>) -> SyncedData {
 
 /// Collect local files that should be uploaded.
 ///
-/// Reads global user settings and CLAUDE.md, plus (if `project_id` is given)
-/// project-local settings and CLAUDE.local.md.  Files larger than 500 KB or
+/// Reads global user settings and AGENTS.md, plus (if `project_id` is given)
+/// project-local settings and AGENTS.local.md.  Files larger than 500 KB or
 /// that cannot be read are silently omitted.
 pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, String> {
     let mut entries = HashMap::new();
@@ -389,7 +389,7 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
     }
 
     // Global user memory
-    let memory_path = claude_config_dir().join("CLAUDE.md");
+    let memory_path = claude_config_dir().join("AGENTS.md");
     if let Some(content) = try_read_for_sync(&memory_path).await {
         entries.insert(SYNC_KEY_USER_MEMORY.to_string(), content);
     }
@@ -398,12 +398,12 @@ pub async fn collect_local_entries(project_id: Option<&str>) -> HashMap<String, 
     if let Some(pid) = project_id {
         let cwd = std::env::current_dir().unwrap_or_default();
 
-        let local_settings = cwd.join(".claude").join("settings.local.json");
+        let local_settings = cwd.join(".claurst").join("settings.local.json");
         if let Some(content) = try_read_for_sync(&local_settings).await {
             entries.insert(sync_key_project_settings(pid), content);
         }
 
-        let local_memory = cwd.join("CLAUDE.local.md");
+        let local_memory = cwd.join("AGENTS.local.md");
         if let Some(content) = try_read_for_sync(&local_memory).await {
             entries.insert(sync_key_project_memory(pid), content);
         }
@@ -436,11 +436,11 @@ async fn write_file_for_sync(path: &PathBuf, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Return the ~/.claude directory.
+/// Return the ~/.claurst directory.
 fn claude_config_dir() -> PathBuf {
     dirs::home_dir()
-        .map(|h| h.join(".claude"))
-        .unwrap_or_else(|| PathBuf::from(".claude"))
+        .map(|h| h.join(".claurst"))
+        .unwrap_or_else(|| PathBuf::from(".claurst"))
 }
 
 /// Exponential backoff delay for retry attempt `n` (1-indexed), capped at 30 s.
@@ -462,15 +462,15 @@ mod tests {
 
     #[test]
     fn test_sync_keys() {
-        assert_eq!(SYNC_KEY_USER_SETTINGS, "~/.claude/settings.json");
-        assert_eq!(SYNC_KEY_USER_MEMORY, "~/.claude/CLAUDE.md");
+        assert_eq!(SYNC_KEY_USER_SETTINGS, "~/.claurst/settings.json");
+        assert_eq!(SYNC_KEY_USER_MEMORY, "~/.claurst/AGENTS.md");
         assert_eq!(
             sync_key_project_settings("abc123"),
-            "projects/abc123/.claude/settings.local.json"
+            "projects/abc123/.claurst/settings.local.json"
         );
         assert_eq!(
             sync_key_project_memory("abc123"),
-            "projects/abc123/CLAUDE.local.md"
+            "projects/abc123/AGENTS.local.md"
         );
     }
 

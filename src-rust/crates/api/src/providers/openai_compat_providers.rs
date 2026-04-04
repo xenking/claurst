@@ -231,3 +231,179 @@ pub fn openrouter() -> OpenAiCompatProvider {
         ..Default::default()
     })
 }
+
+/// SambaNova — fast inference cloud.  Reads `SAMBANOVA_API_KEY`.
+pub fn sambanova() -> OpenAiCompatProvider {
+    let key = std::env::var("SAMBANOVA_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::SAMBANOVA,
+        "SambaNova",
+        "https://api.sambanova.ai/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Hugging Face Inference API.  Reads `HF_TOKEN`.
+pub fn huggingface() -> OpenAiCompatProvider {
+    let key = std::env::var("HF_TOKEN").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::HUGGINGFACE,
+        "Hugging Face",
+        "https://router.huggingface.co/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Nvidia NIM — enterprise AI inference.  Reads `NVIDIA_API_KEY`.
+pub fn nvidia() -> OpenAiCompatProvider {
+    let key = std::env::var("NVIDIA_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::NVIDIA,
+        "Nvidia",
+        "https://integrate.api.nvidia.com/v1",
+    )
+    .with_api_key(key)
+}
+
+/// SiliconFlow — DeepSeek / Qwen hosting.  Reads `SILICONFLOW_API_KEY`.
+pub fn siliconflow() -> OpenAiCompatProvider {
+    let key = std::env::var("SILICONFLOW_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::SILICONFLOW,
+        "SiliconFlow",
+        "https://api.siliconflow.com/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Moonshot AI / Kimi.  Reads `MOONSHOT_API_KEY`.
+pub fn moonshot() -> OpenAiCompatProvider {
+    let key = std::env::var("MOONSHOT_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::MOONSHOT,
+        "Moonshot AI",
+        "https://api.moonshot.ai/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Zhipu AI / GLM.  Reads `ZHIPU_API_KEY`.
+pub fn zhipu() -> OpenAiCompatProvider {
+    let key = std::env::var("ZHIPU_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::ZHIPU,
+        "Zhipu AI",
+        "https://open.bigmodel.cn/api/paas/v4",
+    )
+    .with_api_key(key)
+}
+
+/// Nebius — Llama / Qwen hosting.  Reads `NEBIUS_API_KEY`.
+pub fn nebius() -> OpenAiCompatProvider {
+    let key = std::env::var("NEBIUS_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::NEBIUS,
+        "Nebius",
+        "https://api.tokenfactory.nebius.com/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Novita — Llama / Stable Diffusion hosting.  Reads `NOVITA_API_KEY`.
+pub fn novita() -> OpenAiCompatProvider {
+    let key = std::env::var("NOVITA_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::NOVITA,
+        "Novita",
+        "https://api.novita.ai/v3/openai",
+    )
+    .with_api_key(key)
+}
+
+/// OVHcloud — EU-hosted AI.  Reads `OVHCLOUD_API_KEY`.
+pub fn ovhcloud() -> OpenAiCompatProvider {
+    let key = std::env::var("OVHCLOUD_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::OVHCLOUD,
+        "OVHcloud",
+        "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Scaleway — EU cloud AI.  Reads `SCALEWAY_API_KEY`.
+pub fn scaleway() -> OpenAiCompatProvider {
+    let key = std::env::var("SCALEWAY_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::SCALEWAY,
+        "Scaleway",
+        "https://api.scaleway.ai/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Vultr — cloud inference.  Reads `VULTR_API_KEY`.
+pub fn vultr_ai() -> OpenAiCompatProvider {
+    let key = std::env::var("VULTR_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::VULTR,
+        "Vultr",
+        "https://api.vultrinference.com/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Baseten — model serving.  Reads `BASETEN_API_KEY`.
+pub fn baseten() -> OpenAiCompatProvider {
+    let key = std::env::var("BASETEN_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::BASETEN,
+        "Baseten",
+        "https://inference.baseten.co/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Friendli — serverless inference.  Reads `FRIENDLI_TOKEN`.
+pub fn friendli() -> OpenAiCompatProvider {
+    let key = std::env::var("FRIENDLI_TOKEN").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::FRIENDLI,
+        "Friendli",
+        "https://api.friendli.ai/serverless/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Upstage — Solar models.  Reads `UPSTAGE_API_KEY`.
+pub fn upstage() -> OpenAiCompatProvider {
+    let key = std::env::var("UPSTAGE_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::UPSTAGE,
+        "Upstage",
+        "https://api.upstage.ai/v1/solar",
+    )
+    .with_api_key(key)
+}
+
+/// StepFun — Step models.  Reads `STEPFUN_API_KEY`.
+pub fn stepfun() -> OpenAiCompatProvider {
+    let key = std::env::var("STEPFUN_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::STEPFUN,
+        "StepFun",
+        "https://api.stepfun.com/v1",
+    )
+    .with_api_key(key)
+}
+
+/// Fireworks AI — fast inference.  Reads `FIREWORKS_API_KEY`.
+pub fn fireworks() -> OpenAiCompatProvider {
+    let key = std::env::var("FIREWORKS_API_KEY").unwrap_or_default();
+    OpenAiCompatProvider::new(
+        ProviderId::FIREWORKS,
+        "Fireworks AI",
+        "https://api.fireworks.ai/inference/v1",
+    )
+    .with_api_key(key)
+}

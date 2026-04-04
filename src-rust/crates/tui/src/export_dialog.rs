@@ -134,7 +134,7 @@ pub fn export_as_markdown(
     for msg in messages {
         let label = match msg.role {
             Role::User => "**User**",
-            Role::Assistant => "**Claude**",
+            Role::Assistant => "**Claurst**",
         };
         let text = msg.get_all_text();
         out.push_str(&format!("{}\n\n{}\n\n---\n\n", label, text));

@@ -24,6 +24,13 @@ pub mod attachments;
 // Git utilities (T4-3).
 pub mod git_utils;
 
+// Credential storage for provider API keys and OAuth tokens.
+pub mod auth_store;
+pub use auth_store::{AuthStore, StoredCredential};
+
+// GitHub Device Code Flow (RFC 8628) for OAuth device authorization.
+pub mod device_code;
+
 // Utility modules ported from src/utils/
 pub mod token_budget;
 pub mod truncate;
@@ -36,7 +43,7 @@ pub mod auto_mode;
 pub mod remote_session;
 pub mod cloud_session;
 
-// CLAUDE.md hierarchical memory loading (T4-1).
+// AGENTS.md hierarchical memory loading (T4-1).
 pub mod claudemd;
 
 // Message manipulation utilities (T4-2).
@@ -936,12 +943,40 @@ pub mod config {
     }
 
     impl Config {
-        /// Resolve the effective model, falling back to the compile-time default.
+        /// Resolve the effective model, falling back to a provider-appropriate default.
+        ///
+        /// When a non-Anthropic provider is active and no model is explicitly set,
+        /// returns that provider's canonical default model instead of `DEFAULT_MODEL`
+        /// (which is Claude-specific).
         pub fn effective_model(&self) -> &str {
-            self.model
-                .as_deref()
-                .unwrap_or(crate::constants::DEFAULT_MODEL)
+            if let Some(ref m) = self.model {
+                return m;
+            }
+            match self.provider.as_deref() {
+                Some("openai") => "gpt-4o",
+                Some("google") => "gemini-2.5-flash",
+                Some("groq") => "llama-3.3-70b-versatile",
+                Some("cerebras") => "llama-3.3-70b",
+                Some("deepseek") => "deepseek-chat",
+                Some("mistral") => "mistral-large-latest",
+                Some("xai") => "grok-2",
+                Some("openrouter") => "anthropic/claude-sonnet-4",
+                Some("togetherai") | Some("together-ai") => "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                Some("perplexity") => "sonar-pro",
+                Some("cohere") => "command-r-plus",
+                Some("deepinfra") => "meta-llama/Llama-3.3-70B-Instruct",
+                Some("github-copilot") => "gpt-4o",
+                Some("ollama") => "llama3.2",
+                Some("lmstudio") => "default",
+                Some("llamacpp") => "default",
+                Some("azure") => "gpt-4o",
+                Some("amazon-bedrock") => "anthropic.claude-sonnet-4-6-v1",
+                Some("venice") => "llama-3.3-70b",
+                _ => crate::constants::DEFAULT_MODEL, // Anthropic default
+            }
         }
+
+
 
         /// Resolve the effective max-tokens.
         pub fn effective_max_tokens(&self) -> u32 {
@@ -967,7 +1002,7 @@ pub mod config {
         }
 
         /// Resolve the prompt text for the selected output style, including
-        /// user-defined styles loaded from `~/.claude/output-styles/`.
+        /// user-defined styles loaded from `~/.claurst/output-styles/`.
         pub fn resolve_output_style_prompt(&self) -> Option<String> {
             let style_name = self.output_style.as_deref().unwrap_or("default");
             let styles = crate::output_styles::all_styles(&Settings::config_dir());
@@ -983,7 +1018,7 @@ pub mod config {
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
         }
 
-        /// Async variant: also checks `~/.claude/oauth_tokens.json`.
+        /// Async variant: also checks `~/.claurst/oauth_tokens.json`.
         /// Returns `(credential, use_bearer_auth)`.
         /// - For Console OAuth flow: credential is the stored API key, bearer=false.
         /// - For Claude.ai OAuth flow: credential is the access token, bearer=true.
@@ -1058,11 +1093,11 @@ pub mod config {
     }
 
     impl Settings {
-        /// The per-user configuration directory (`~/.claude`).
+        /// The per-user configuration directory (`~/.claurst`).
         pub fn config_dir() -> PathBuf {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".claude")
+                .join(".claurst")
         }
 
         /// Full path to the global settings JSON file.
@@ -1167,15 +1202,15 @@ pub mod config {
             merged
         }
 
-        /// Walk up from `cwd` looking for `.claude/settings.json` or
-        /// `.claude/settings.jsonc`.
+        /// Walk up from `cwd` looking for `.claurst/settings.json` or
+        /// `.claurst/settings.jsonc`.
         async fn find_project_settings(cwd: &std::path::Path) -> Option<Self> {
             let global_path = Self::global_settings_path();
             let mut dir = cwd;
             loop {
                 // Try .json first, then .jsonc.
                 for name in &["settings.json", "settings.jsonc"] {
-                    let candidate = dir.join(".claude").join(name);
+                    let candidate = dir.join(".claurst").join(name);
                     if candidate.exists() && candidate != global_path {
                         if let Ok(content) = tokio::fs::read_to_string(&candidate).await {
                             let stripped = strip_jsonc_comments(&content);
@@ -1375,10 +1410,10 @@ pub mod constants {
          effort-2025-11-24";
 
     // File system
-    pub const CLAUDE_MD_FILENAME: &str = "CLAUDE.md";
+    pub const CLAUDE_MD_FILENAME: &str = "AGENTS.md";
     pub const SETTINGS_FILENAME: &str = "settings.json";
     pub const HISTORY_FILENAME: &str = "conversations";
-    pub const CONFIG_DIR_NAME: &str = ".claude";
+    pub const CONFIG_DIR_NAME: &str = ".claurst";
 
     // Tool names
     pub const TOOL_NAME_BASH: &str = "Bash";
@@ -1469,7 +1504,7 @@ pub mod context {
             parts.join("\n\n")
         }
 
-        /// User context (date, CLAUDE.md memories, etc.)
+        /// User context (date, AGENTS.md memories, etc.)
         pub async fn build_user_context(&self) -> String {
             let mut parts = vec![];
 
@@ -1519,14 +1554,14 @@ pub mod context {
             Some(result)
         }
 
-        /// Walk up from cwd looking for CLAUDE.md files and the global one.
+        /// Walk up from cwd looking for AGENTS.md files and the global one.
         async fn find_and_read_claude_md(&self) -> Option<String> {
             let mut claude_mds = vec![];
 
-            // Global ~/.claude/CLAUDE.md
+            // Global ~/.claurst/AGENTS.md
             if let Some(home) = dirs::home_dir() {
                 let global_claude_md =
-                    home.join(".claude").join(crate::constants::CLAUDE_MD_FILENAME);
+                    home.join(".claurst").join(crate::constants::CLAUDE_MD_FILENAME);
                 if global_claude_md.exists() {
                     if let Ok(content) = tokio::fs::read_to_string(&global_claude_md).await {
                         claude_mds.push(format!(
@@ -1538,7 +1573,7 @@ pub mod context {
                 }
             }
 
-            // Walk from cwd up to filesystem root, collecting CLAUDE.md
+            // Walk from cwd up to filesystem root, collecting AGENTS.md
             let mut dir = Some(self.cwd.as_path());
             let mut project_mds: Vec<String> = vec![];
             while let Some(d) = dir {
@@ -2397,6 +2432,12 @@ pub mod history {
         /// Saved checkpoints (rewind points) within this session.
         #[serde(default)]
         pub checkpoints: Vec<SessionCheckpoint>,
+        /// ID of the parent session this was forked from (via /fork).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub parent_session_id: Option<String>,
+        /// Message index in the parent session at which this fork was created.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub fork_point_message_index: Option<usize>,
     }
 
     impl ConversationSession {
@@ -2417,6 +2458,8 @@ pub mod history {
                 total_cost: 0.0,
                 total_tokens: 0,
                 checkpoints: vec![],
+                parent_session_id: None,
+                fork_point_message_index: None,
             }
         }
 
@@ -2479,7 +2522,7 @@ pub mod history {
         crate::config::Settings::config_dir().join("sessions")
     }
 
-    /// Save a session to `~/.claude/sessions/<id>.json`.
+    /// Save a session to `~/.claurst/sessions/<id>.json`.
     pub async fn save_session(session: &ConversationSession) -> anyhow::Result<()> {
         let dir = sessions_dir();
         tokio::fs::create_dir_all(&dir).await?;
@@ -2595,6 +2638,8 @@ pub mod history {
             total_cost: 0.0,
             total_tokens: 0,
             checkpoints: vec![],
+            parent_session_id: None,
+            fork_point_message_index: None,
         };
         save_session(&branched).await?;
         Ok(branched)
@@ -2925,7 +2970,9 @@ pub mod oauth {
 
     // ---- Production OAuth endpoints & constants ----
 
-    pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    // NOTE: This client ID is registered to Anthropic's official Claude Code CLI.
+    // It will NOT work for Claurst. Users should use an API key from console.anthropic.com.
+    pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"; // Anthropic's — will not work for Claurst
     pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
     pub const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
     pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -2953,7 +3000,7 @@ pub mod oauth {
 
     // ---- Stored token struct ----
 
-    /// Persisted OAuth tokens (saved to `~/.claude/oauth_tokens.json`).
+    /// Persisted OAuth tokens (saved to `~/.claurst/oauth_tokens.json`).
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     pub struct OAuthTokens {
         pub access_token: String,
@@ -3008,7 +3055,7 @@ pub mod oauth {
         pub fn token_file_path() -> std::path::PathBuf {
             dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".claude")
+                .join(".claurst")
                 .join("oauth_tokens.json")
         }
 

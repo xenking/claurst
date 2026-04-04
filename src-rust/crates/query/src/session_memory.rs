@@ -1,7 +1,7 @@
 // Session Memory Extraction for cc-query.
 //
 // Runs a background task after a session to extract key facts worth
-// remembering and persist them to CLAUDE.md.
+// remembering and persist them to AGENTS.md.
 //
 // This mirrors TypeScript services/SessionMemory/sessionMemory.ts and
 // services/extractMemories/extractMemories.ts.
@@ -10,7 +10,7 @@
 //   1. After sessions with 20+ messages (or on compact), call the API with a
 //      structured extraction prompt.
 //   2. Parse the response into typed ExtractedMemory entries.
-//   3. Append entries under "## Auto-extracted memories" in CLAUDE.md
+//   3. Append entries under "## Auto-extracted memories" in AGENTS.md
 //      (creating the file if it doesn't exist).
 //   4. Track state so we don't re-extract from already-processed messages.
 
@@ -557,7 +557,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
     #[tokio::test]
     async fn test_persist_creates_file() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join(".claude").join("CLAUDE.md");
+        let target = dir.path().join(".claurst").join("AGENTS.md");
 
         let memories = vec![
             ExtractedMemory {
@@ -578,7 +578,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
     #[tokio::test]
     async fn test_persist_appends_to_existing() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("CLAUDE.md");
+        let target = dir.path().join("AGENTS.md");
 
         // Write initial content
         fs::write(&target, "# My Project\n\nExisting content.\n").await.unwrap();
@@ -602,7 +602,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
     #[tokio::test]
     async fn test_persist_appends_under_existing_section() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("CLAUDE.md");
+        let target = dir.path().join("AGENTS.md");
 
         // Pre-populate the auto-extracted section
         let initial = "# Notes\n\n## Auto-extracted memories\n\n### Old memories\n- old fact\n";
@@ -629,7 +629,7 @@ MEMORY: code_pattern | 7 | Uses builder pattern";
     #[tokio::test]
     async fn test_persist_no_op_for_empty_memories() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("CLAUDE.md");
+        let target = dir.path().join("AGENTS.md");
 
         SessionMemoryExtractor::persist(&[], &target).await.unwrap();
 

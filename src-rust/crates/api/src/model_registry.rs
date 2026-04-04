@@ -199,12 +199,183 @@ impl ModelRegistry {
         }
     }
 
+    /// Look up a bare model name across all registry entries and return the
+    /// provider that owns it.  Returns `None` if the model is not found or
+    /// if the model string already contains a `"provider/"` prefix.
+    ///
+    /// This enables automatic provider detection for model names like
+    /// `"gemini-3-flash-preview"` → `google`, `"gpt-4o"` → `openai`, etc.
+    pub fn find_provider_for_model(&self, model_name: &str) -> Option<ProviderId> {
+        // If the caller already has a "provider/model" string, don't search.
+        if model_name.contains('/') {
+            return None;
+        }
+
+        // 1. Family-based heuristic FIRST: well-known model name prefixes
+        //    always map to their canonical provider.  This prevents
+        //    gateway/proxy entries in the models.dev cache (e.g. "llmgateway")
+        //    from hijacking well-known models like claude-* or gpt-*.
+        let canonical = if model_name.starts_with("claude") {
+            Some(ProviderId::ANTHROPIC)
+        } else if model_name.starts_with("gpt-") || model_name.starts_with("o1") || model_name.starts_with("o3") || model_name.starts_with("o4") {
+            Some(ProviderId::OPENAI)
+        } else if model_name.starts_with("gemini") || model_name.starts_with("gemma") {
+            Some(ProviderId::GOOGLE)
+        } else if model_name.starts_with("deepseek") {
+            Some("deepseek")
+        } else if model_name.starts_with("mistral") || model_name.starts_with("codestral") || model_name.starts_with("pixtral") {
+            Some("mistral")
+        } else if model_name.starts_with("grok") {
+            Some("xai")
+        } else if model_name.starts_with("command-r") || model_name.starts_with("command-a") {
+            Some("cohere")
+        } else if model_name.starts_with("sonar") {
+            Some("perplexity")
+        } else {
+            None
+        };
+        if let Some(pid) = canonical {
+            return Some(ProviderId::new(pid));
+        }
+
+        // 2. Exact match: look for any entry whose model ID matches.
+        for entry in self.entries.values() {
+            if &*entry.info.id == model_name {
+                return Some(entry.info.provider_id.clone());
+            }
+        }
+
+        // 3. Prefix match: some models have version suffixes that differ from
+        // the canonical ID (e.g. "gemini-3-flash-preview" may be stored as
+        // "gemini-3-flash-preview-05-20").  Try a prefix match.
+        for entry in self.entries.values() {
+            if (&*entry.info.id).starts_with(model_name)
+                || model_name.starts_with(&*entry.info.id)
+            {
+                return Some(entry.info.provider_id.clone());
+            }
+        }
+
+        None
+    }
+
     /// List all models for a given provider.
     pub fn list_by_provider(&self, provider_id: &str) -> Vec<&ModelEntry> {
         self.entries
             .values()
             .filter(|e| &*e.info.provider_id == provider_id)
             .collect()
+    }
+
+    /// Pick the best default model for a given provider.
+    ///
+    /// Uses a priority-based scoring system inspired by OpenCode:
+    ///   1. Models matching well-known "flagship" patterns rank highest
+    ///   2. Models with "latest" in the ID are preferred
+    ///   3. Otherwise, models are ranked by descending ID (newer versions first)
+    ///
+    /// Returns the model ID string, or `None` if the provider has no models.
+    pub fn best_model_for_provider(&self, provider_id: &str) -> Option<String> {
+        let mut models: Vec<&ModelEntry> = self.list_by_provider(provider_id);
+        if models.is_empty() {
+            return None;
+        }
+
+        // Priority patterns: models matching these substrings are considered
+        // "flagship" quality and are preferred as defaults.
+        // Mirrors OpenCode's: ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"]
+        let priority_patterns: &[&str] = &[
+            "claude-sonnet-4",
+            "gpt-5",
+            "gpt-4o",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "deepseek-chat",
+            "mistral-large",
+            "grok-2",
+            "command-r-plus",
+            "llama-3.3-70b",
+            "sonar-pro",
+        ];
+
+        // Score each model: lower is better.
+        // Priority match = index in priority_patterns (or usize::MAX if not found).
+        // "latest" suffix bonus = 0, otherwise 1.
+        // Tie-break: descending ID.
+        models.sort_by(|a, b| {
+            let id_a: &str = &a.info.id;
+            let id_b: &str = &b.info.id;
+
+            let prio_a = priority_patterns
+                .iter()
+                .position(|pat| id_a.contains(pat))
+                .unwrap_or(usize::MAX);
+            let prio_b = priority_patterns
+                .iter()
+                .position(|pat| id_b.contains(pat))
+                .unwrap_or(usize::MAX);
+
+            prio_a
+                .cmp(&prio_b)
+                .then_with(|| {
+                    let latest_a = if id_a.contains("latest") { 0u8 } else { 1 };
+                    let latest_b = if id_b.contains("latest") { 0u8 } else { 1 };
+                    latest_a.cmp(&latest_b)
+                })
+                .then_with(|| id_b.cmp(id_a)) // descending by ID
+        });
+
+        models.first().map(|e| e.info.id.to_string())
+    }
+
+    /// Pick the best "small" model for a given provider.
+    ///
+    /// Small models are optimised for speed and cost rather than quality.
+    /// Uses the same priority-sort pattern as [`best_model_for_provider`]
+    /// but with a different priority list targeting lightweight models.
+    pub fn best_small_model_for_provider(&self, provider_id: &str) -> Option<String> {
+        let mut models: Vec<&ModelEntry> = self.list_by_provider(provider_id);
+        if models.is_empty() {
+            return None;
+        }
+
+        let small_priority: &[&str] = &[
+            "claude-haiku-4",
+            "gpt-4o-mini",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "deepseek-chat",
+            "mistral-small",
+            "grok-2-mini",
+            "command-r",
+            "llama-3.3-8b",
+            "sonar",
+        ];
+
+        models.sort_by(|a, b| {
+            let id_a: &str = &a.info.id;
+            let id_b: &str = &b.info.id;
+
+            let prio_a = small_priority
+                .iter()
+                .position(|pat| id_a.contains(pat))
+                .unwrap_or(usize::MAX);
+            let prio_b = small_priority
+                .iter()
+                .position(|pat| id_b.contains(pat))
+                .unwrap_or(usize::MAX);
+
+            prio_a
+                .cmp(&prio_b)
+                .then_with(|| {
+                    let latest_a = if id_a.contains("latest") { 0u8 } else { 1 };
+                    let latest_b = if id_b.contains("latest") { 0u8 } else { 1 };
+                    latest_a.cmp(&latest_b)
+                })
+                .then_with(|| id_b.cmp(id_a))
+        });
+
+        models.first().map(|e| e.info.id.to_string())
     }
 
     /// List every entry in the registry.
@@ -297,8 +468,8 @@ impl ModelRegistry {
                         let mid = ModelId::new(model_id.as_str());
                         let key = format!("{}/{}", pid, mid);
 
-                        // Only insert if not already present (bundled snapshot wins).
-                        self.entries.entry(key).or_insert_with(|| ModelEntry {
+                        // models.dev is the source of truth — overwrite bundled snapshot data.
+                        self.entries.insert(key, ModelEntry {
                             info: ModelInfo {
                                 id: mid,
                                 provider_id: pid,
@@ -333,13 +504,36 @@ impl ModelRegistry {
     }
 
     /// Load a previously saved cache file, merging entries into the registry.
+    ///
+    /// The cache file may be either:
+    /// 1. The raw models.dev `api.json` response (providers at the top level), or
+    /// 2. Our own serialized `HashMap<String, ModelEntry>` format.
+    ///
+    /// Both formats are tried in order so the background fetch can simply save
+    /// the raw models.dev response to disk and this method will ingest it.
     pub fn load_cache(&mut self, path: &PathBuf) {
-        if let Ok(data) = std::fs::read_to_string(path) {
-            if let Ok(entries) =
-                serde_json::from_str::<HashMap<String, ModelEntry>>(&data)
-            {
-                self.entries.extend(entries);
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+            // Heuristic: if the top-level object contains a key whose value has
+            // a "models" sub-object, it's the raw models.dev format.
+            let looks_like_models_dev = json
+                .as_object()
+                .map(|obj| obj.values().any(|v| v.get("models").is_some()))
+                .unwrap_or(false);
+
+            if looks_like_models_dev {
+                self.parse_models_dev_response(&json);
+                return;
             }
+        }
+        // Fall back to our own serialized format.
+        if let Ok(entries) =
+            serde_json::from_str::<HashMap<String, ModelEntry>>(&data)
+        {
+            self.entries.extend(entries);
         }
     }
 }
@@ -348,4 +542,36 @@ impl Default for ModelRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic model resolution helper
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective model for a [`Config`], using the model registry to
+/// dynamically pick the best available model for the active provider.
+///
+/// **Resolution order** (mirrors OpenCode's approach):
+///  1. If the user explicitly set `config.model`, use it verbatim.
+///  2. Consult the model registry for the configured provider's best model
+///     (scored by flagship priority → "latest" preference → ID desc).
+///  3. Fall back to the hardcoded table in [`Config::effective_model()`].
+pub fn effective_model_for_config(
+    config: &claurst_core::Config,
+    registry: &ModelRegistry,
+) -> String {
+    // Explicit user override — always wins.
+    if config.model.is_some() {
+        return config.effective_model().to_string();
+    }
+
+    // Try the model registry for the configured provider.
+    if let Some(provider_id) = config.provider.as_deref() {
+        if let Some(best) = registry.best_model_for_provider(provider_id) {
+            return best;
+        }
+    }
+
+    // Fall back to the hardcoded table.
+    config.effective_model().to_string()
 }

@@ -1,7 +1,7 @@
 //! Stats dialog — mirrors src/components/Stats.tsx
 //!
 //! Four-tab overlay: Overview | Daily Tokens | Cost Heatmap | Models
-//! Data source: ~/.claude/stats.jsonl (append-only per-turn usage log)
+//! Data source: ~/.claurst/stats.jsonl (append-only per-turn usage log)
 
 use ratatui::{
     buffer::Buffer,
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 // Data types
 // ---------------------------------------------------------------------------
 
-/// A single entry in ~/.claude/stats.jsonl
+/// A single entry in ~/.claurst/stats.jsonl
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StatsEntry {
     pub timestamp_ms: u64,
@@ -69,10 +69,10 @@ pub struct ModelBreakdown {
 // Data loading
 // ---------------------------------------------------------------------------
 
-/// Load and aggregate stats from ~/.claude/stats.jsonl
+/// Load and aggregate stats from ~/.claurst/stats.jsonl
 pub fn load_stats() -> AggregatedStats {
     let path = dirs::home_dir()
-        .map(|h| h.join(".claude").join("stats.jsonl"))
+        .map(|h| h.join(".claurst").join("stats.jsonl"))
         .unwrap_or_default();
 
     let content = match std::fs::read_to_string(&path) {

@@ -202,7 +202,7 @@ async fn handle_request(req: JsonRpcRequest) -> JsonRpcResponse {
                 id,
                 serde_json::json!({
                     "status": "accepted",
-                    "message": "Message received. Full streaming support coming soon."
+                    "message": "Message received. Streaming support is not yet implemented."
                 }),
             )
         }

@@ -108,7 +108,7 @@ fn default_toggles() -> Vec<PrivacyToggle> {
         PrivacyToggle {
             key: "api_request_logging",
             label: "API Request Logging",
-            description: "Log API requests to a local file (~/.claude/api_requests.log) \
+            description: "Log API requests to a local file (~/.claurst/api_requests.log) \
                           for debugging. Logs are stored locally only.",
             enabled: false,
         },

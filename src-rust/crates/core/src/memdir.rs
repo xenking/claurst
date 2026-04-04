@@ -334,7 +334,7 @@ pub const MAX_ENTRYPOINT_BYTES: usize = 25_000;
 /// 1. `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` env var (full-path override).
 /// 2. `<CLAURST_REMOTE_MEMORY_DIR>/projects/<sanitized-root>/memory/`
 ///    when `CLAURST_REMOTE_MEMORY_DIR` is set.
-/// 3. `~/.claude/projects/<sanitized-root>/memory/` (default).
+/// 3. `~/.claurst/projects/<sanitized-root>/memory/` (default).
 pub fn auto_memory_path(project_root: &Path) -> PathBuf {
     // 1. Cowork full-path override.
     if let Ok(override_path) = std::env::var("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE") {
@@ -349,7 +349,7 @@ pub fn auto_memory_path(project_root: &Path) -> PathBuf {
         .unwrap_or_else(|_| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".claude")
+                .join(".claurst")
         });
 
     // 3. Sanitize the project root into a safe directory name.

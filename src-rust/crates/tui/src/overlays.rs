@@ -27,6 +27,37 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Reusable overlay helpers (shared by all dialog renderers)
+// ---------------------------------------------------------------------------
+
+/// Darken the entire screen with a semi-transparent overlay.
+/// Call this BEFORE rendering any dialog content.
+pub fn render_dark_overlay(frame: &mut Frame, area: Rect) {
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_bg(Color::Rgb(10, 10, 14));
+                cell.set_fg(Color::Rgb(40, 40, 45));
+            }
+        }
+    }
+}
+
+/// Fill a rectangle with the standard dialog background color (no border).
+pub fn render_dialog_bg(frame: &mut Frame, area: Rect) {
+    let bg = Color::Rgb(30, 30, 35);
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_bg(bg);
+                cell.set_fg(Color::White);
+            }
+        }
+    }
+}
+
 // ============================================================================
 // HelpOverlay
 // ============================================================================
@@ -347,7 +378,7 @@ pub struct HistoryEntry {
     pub timestamp: Option<u64>,
     /// Whether this entry has been pinned by the user.  Pinned entries always
     /// appear at the top of the history overlay list and are persisted to
-    /// `~/.claude/history_pins.json`.
+    /// `~/.claurst/history_pins.json`.
     pub pinned: bool,
 }
 
@@ -383,17 +414,17 @@ impl HistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned-entry persistence  (~/.claude/history_pins.json)
+// Pinned-entry persistence  (~/.claurst/history_pins.json)
 // ---------------------------------------------------------------------------
 
 fn pins_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".claude")
+        .join(".claurst")
         .join("history_pins.json")
 }
 
-/// Load the set of pinned entry texts from `~/.claude/history_pins.json`.
+/// Load the set of pinned entry texts from `~/.claurst/history_pins.json`.
 /// Returns an empty set if the file does not exist or cannot be parsed.
 pub fn load_pinned_texts() -> std::collections::HashSet<String> {
     let path = pins_path();
@@ -405,7 +436,7 @@ pub fn load_pinned_texts() -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Persist `pinned_texts` to `~/.claude/history_pins.json`.
+/// Persist `pinned_texts` to `~/.claurst/history_pins.json`.
 /// Failures are silently ignored (best-effort).
 pub fn save_pinned_texts(pinned_texts: &std::collections::HashSet<String>) {
     let path = pins_path();
@@ -570,7 +601,7 @@ impl HistorySearchOverlay {
 
     /// Open with a pre-built `Vec<HistoryEntry>` (timestamp-aware callers).
     ///
-    /// Pinned state is loaded from `~/.claude/history_pins.json` and applied
+    /// Pinned state is loaded from `~/.claurst/history_pins.json` and applied
     /// to any matching entries.
     pub fn open_with_entries(entries: Vec<HistoryEntry>) -> Self {
         let pinned_texts = load_pinned_texts();
@@ -596,7 +627,7 @@ impl HistorySearchOverlay {
 
     /// Toggle the pinned state of the currently selected entry.
     ///
-    /// Persists the updated pin set to `~/.claude/history_pins.json` and
+    /// Persists the updated pin set to `~/.claurst/history_pins.json` and
     /// recomputes the match list so the entry moves to/from the pinned section.
     pub fn toggle_pin(&mut self) {
         let Some(m) = self.matches.get(self.selected_idx) else { return };

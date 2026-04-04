@@ -178,6 +178,78 @@ impl ProviderRegistry {
         registry
     }
 
+    /// Build a registry that checks **both** environment variables and the
+    /// persistent [`AuthStore`] (`~/.claurst/auth.json`) for credentials.
+    ///
+    /// This ensures that API keys stored via `/connect` or `claurst auth` are
+    /// picked up at startup, not just env vars.  Falls back to
+    /// `from_environment` for providers that only support env-var config, and
+    /// adds any extra providers that have keys in the auth store.
+    ///
+    /// [`AuthStore`]: claurst_core::AuthStore
+    pub fn from_environment_with_auth_store(anthropic_config: ClientConfig) -> Self {
+        // Start with env-based registration.
+        let mut registry = Self::from_environment(anthropic_config);
+
+        // Now check the auth store for providers that weren't registered from
+        // env vars.
+        let auth_store = claurst_core::AuthStore::load();
+
+        for (provider_id, _cred) in &auth_store.credentials {
+            let pid = claurst_core::ProviderId::new(provider_id.as_str());
+            // Skip if already registered from env vars.
+            if registry.get(&pid).is_some() {
+                continue;
+            }
+            // Try to get a usable key from the auth store.
+            if let Some(key) = auth_store.api_key_for(provider_id) {
+                if key.is_empty() {
+                    continue;
+                }
+                use crate::providers::openai_compat_providers as p;
+                let provider: Option<Arc<dyn LlmProvider>> = match provider_id.as_str() {
+                    "openai" => Some(Arc::new(OpenAiProvider::new(key))),
+                    "google" => Some(Arc::new(GoogleProvider::new(key))),
+                    "github-copilot" => Some(Arc::new(CopilotProvider::new(key))),
+                    "cohere" => Some(Arc::new(CohereProvider::new(key))),
+                    "groq" => Some(Arc::new(p::groq().with_api_key(key))),
+                    "mistral" => Some(Arc::new(p::mistral().with_api_key(key))),
+                    "deepseek" => Some(Arc::new(p::deepseek().with_api_key(key))),
+                    "xai" => Some(Arc::new(p::xai().with_api_key(key))),
+                    "openrouter" => Some(Arc::new(p::openrouter().with_api_key(key))),
+                    "togetherai" | "together-ai" => Some(Arc::new(p::together_ai().with_api_key(key))),
+                    "perplexity" => Some(Arc::new(p::perplexity().with_api_key(key))),
+                    "cerebras" => Some(Arc::new(p::cerebras().with_api_key(key))),
+                    "deepinfra" => Some(Arc::new(p::deepinfra().with_api_key(key))),
+                    "venice" => Some(Arc::new(p::venice().with_api_key(key))),
+                    "huggingface" => Some(Arc::new(p::huggingface().with_api_key(key))),
+                    "nvidia" => Some(Arc::new(p::nvidia().with_api_key(key))),
+                    "siliconflow" => Some(Arc::new(p::siliconflow().with_api_key(key))),
+                    "sambanova" => Some(Arc::new(p::sambanova().with_api_key(key))),
+                    "moonshot" => Some(Arc::new(p::moonshot().with_api_key(key))),
+                    "zhipu" => Some(Arc::new(p::zhipu().with_api_key(key))),
+                    "qwen" => Some(Arc::new(p::qwen().with_api_key(key))),
+                    "nebius" => Some(Arc::new(p::nebius().with_api_key(key))),
+                    "novita" => Some(Arc::new(p::novita().with_api_key(key))),
+                    "ovhcloud" => Some(Arc::new(p::ovhcloud().with_api_key(key))),
+                    "scaleway" => Some(Arc::new(p::scaleway().with_api_key(key))),
+                    "vultr" | "vultr-ai" => Some(Arc::new(p::vultr_ai().with_api_key(key))),
+                    "baseten" => Some(Arc::new(p::baseten().with_api_key(key))),
+                    "friendli" => Some(Arc::new(p::friendli().with_api_key(key))),
+                    "upstage" => Some(Arc::new(p::upstage().with_api_key(key))),
+                    "stepfun" => Some(Arc::new(p::stepfun().with_api_key(key))),
+                    "fireworks" => Some(Arc::new(p::fireworks().with_api_key(key))),
+                    _ => None,
+                };
+                if let Some(p) = provider {
+                    registry.register(p);
+                }
+            }
+        }
+
+        registry
+    }
+
     /// Register all providers that have environment variable credentials set.
     ///
     /// Local providers (Ollama, LM Studio, llama.cpp) are always registered
@@ -229,6 +301,54 @@ impl ProviderRegistry {
         }
         if std::env::var("MISTRAL_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
             self.register(Arc::new(p::mistral()));
+        }
+        if std::env::var("SAMBANOVA_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::sambanova()));
+        }
+        if std::env::var("HF_TOKEN").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::huggingface()));
+        }
+        if std::env::var("NVIDIA_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::nvidia()));
+        }
+        if std::env::var("SILICONFLOW_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::siliconflow()));
+        }
+        if std::env::var("MOONSHOT_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::moonshot()));
+        }
+        if std::env::var("ZHIPU_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::zhipu()));
+        }
+        if std::env::var("NEBIUS_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::nebius()));
+        }
+        if std::env::var("NOVITA_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::novita()));
+        }
+        if std::env::var("OVHCLOUD_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::ovhcloud()));
+        }
+        if std::env::var("SCALEWAY_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::scaleway()));
+        }
+        if std::env::var("VULTR_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::vultr_ai()));
+        }
+        if std::env::var("BASETEN_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::baseten()));
+        }
+        if std::env::var("FRIENDLI_TOKEN").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::friendli()));
+        }
+        if std::env::var("UPSTAGE_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::upstage()));
+        }
+        if std::env::var("STEPFUN_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::stepfun()));
+        }
+        if std::env::var("FIREWORKS_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+            self.register(Arc::new(p::fireworks()));
         }
         self
     }

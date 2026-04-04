@@ -1,11 +1,11 @@
 // desktop_upsell_startup.rs — DesktopUpsellStartup surface.
 //
 // Shown at startup on supported platforms (macOS / Windows x64) when the user
-// hasn't yet tried the Claude Code Desktop app.  Mirrors the behavior of
+// hasn't yet tried the Claurst Code Desktop app.  Mirrors the behavior of
 // src/components/DesktopUpsell/DesktopUpsellStartup.tsx:
 //
 //   - Shown at most 3 times per user (seen_count guard).
-//   - Three choices: "Open in Claude Code Desktop" (Try), "Not now", "Don't ask again".
+//   - Three choices: "Open in Claurst Code Desktop" (Try), "Not now", "Don't ask again".
 //   - "Try" acknowledges and closes (CLI cannot actually launch the desktop app,
 //     so we treat it the same as "Not now" but could be extended).
 //   - "Don't ask again" sets the dismissed flag permanently.
@@ -43,7 +43,7 @@ pub enum DesktopUpsellSelection {
 impl DesktopUpsellSelection {
     fn label(self) -> &'static str {
         match self {
-            Self::Try => "Open in Claude Code Desktop",
+            Self::Try => "Open in Claurst Code Desktop",
             Self::NotNow => "Not now",
             Self::Never => "Don't ask again",
         }
@@ -151,7 +151,7 @@ pub fn render_desktop_upsell_startup(
 
     Block::default()
         .title(Span::styled(
-            " Claude Code Desktop ",
+            " Claurst Code Desktop ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -296,7 +296,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         render_desktop_upsell_startup(&state, area, &mut buf);
         let rendered = buf.content.iter().map(|c| c.symbol()).collect::<Vec<_>>().join("");
-        assert!(rendered.contains("Claude Code Desktop") || rendered.contains("visual diffs"));
+        assert!(rendered.contains("Claurst Code Desktop") || rendered.contains("visual diffs"));
     }
 
     #[test]

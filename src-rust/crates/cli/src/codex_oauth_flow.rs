@@ -59,28 +59,10 @@ pub fn build_auth_url(code_challenge: &str, state: &str) -> String {
 /// Start local HTTP server on port 1455, open browser, wait for callback,
 /// exchange code for tokens, return CodexTokens.
 pub async fn run_oauth_flow() -> anyhow::Result<CodexTokens> {
-    let verifier = generate_code_verifier();
-    let challenge = compute_code_challenge(&verifier);
-    let state = generate_state();
-
-    let auth_url = build_auth_url(&challenge, &state);
-
-    // Open browser
-    open::that(&auth_url)
-        .map_err(|e| anyhow!("Failed to open browser: {}", e))?;
-
-    // Listen on port 1455 for redirect
-    let listener = TcpListener::bind("127.0.0.1:1455").await
-        .map_err(|e| anyhow!("Failed to bind to localhost:1455: {}", e))?;
-
-    let (code, returned_state) = wait_for_callback(listener).await?;
-
-    if returned_state != state {
-        bail!("OAuth state mismatch: expected {}, got {}", state, returned_state);
-    }
-
-    // Exchange code for tokens
-    exchange_code_for_tokens(&code, &verifier).await
+    anyhow::bail!(
+        "OpenAI Codex OAuth requires a registered application.\n\
+         Use an OpenAI API key instead: set OPENAI_API_KEY or use /connect → OpenAI."
+    );
 }
 
 /// Wait for OAuth callback on local server, extract code and state.

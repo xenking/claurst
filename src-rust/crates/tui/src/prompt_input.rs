@@ -2448,7 +2448,7 @@ pub fn render_prompt_input(
     }
 
     let accent = match mode {
-        InputMode::Readonly => CLAUDE_ORANGE,   // orange = locked while Claude responds
+        InputMode::Readonly => CLAUDE_ORANGE,   // orange = locked while Claurst responds
         InputMode::Plan => Color::Yellow,
         InputMode::Default => CLAUDE_ORANGE,    // always orange regardless of focus
     };

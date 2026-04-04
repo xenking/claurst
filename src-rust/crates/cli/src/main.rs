@@ -3,7 +3,7 @@
 // This is the main binary for Claurst. It:
 // 1. Parses CLI arguments with clap (mirrors cli.tsx + main.tsx flags)
 // 2. Loads configuration from settings.json + env vars
-// 3. Builds system/user context (git status, CLAUDE.md)
+// 3. Builds system/user context (git status, AGENTS.md)
 // 4. Runs in either:
 //    - Headless (--print / -p) mode: single query, output to stdout
 //    - Interactive REPL mode: full TUI with ratatui
@@ -144,7 +144,7 @@ struct Cli {
     #[arg(long = "append-system-prompt")]
     append_system_prompt: Option<String>,
 
-    /// Disable CLAUDE.md memory files
+    /// Disable AGENTS.md memory files
     #[arg(long = "no-claude-md", action = ArgAction::SetTrue)]
     no_claude_md: bool,
 
@@ -184,7 +184,7 @@ struct Cli {
     #[arg(long = "no-auto-compact", action = ArgAction::SetTrue)]
     no_auto_compact: bool,
 
-    /// Grant Claude access to an additional directory (can be repeated)
+    /// Grant Claurst access to an additional directory (can be repeated)
     #[arg(long = "add-dir", value_name = "DIR", action = ArgAction::Append)]
     add_dir: Vec<PathBuf>,
 
@@ -232,7 +232,7 @@ struct Cli {
     #[arg(long = "disable-slash-commands", action = ArgAction::SetTrue)]
     disable_slash_commands: bool,
 
-    /// Run in bare mode (no hooks, no plugins, no CLAUDE.md)
+    /// Run in bare mode (no hooks, no plugins, no AGENTS.md)
     #[arg(long = "bare", action = ArgAction::SetTrue)]
     bare: bool,
 
@@ -355,7 +355,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Fast-path: `claude models` — list all available providers and models.
     if raw_args.get(1).map(|s| s.as_str()) == Some("models") {
-        let registry = claurst_api::ModelRegistry::new();
+        let mut registry = claurst_api::ModelRegistry::new();
+        // Load cached models.dev data if available so the list is comprehensive.
+        let cache_path = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("claurst")
+            .join("models.json");
+        registry.load_cache(&cache_path);
         let mut entries = registry.list_all();
         // Sort by provider then model id for stable output.
         entries.sort_by(|a, b| {
@@ -596,12 +602,13 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to create API client")?,
     );
 
-    // Build provider registry: auto-registers all env-configured providers.
+    // Build provider registry: auto-registers all env-configured providers
+    // AND providers with keys stored in ~/.claurst/auth.json (from /connect).
     // Anthropic is always the default; additional providers (OpenAI, Google,
     // Bedrock, Azure, Copilot, Cohere, local providers) are registered when
-    // their respective environment variables are set.
+    // their respective environment variables or auth store entries are found.
     let provider_registry =
-        claurst_api::ProviderRegistry::from_environment(client_config);
+        claurst_api::ProviderRegistry::from_environment_with_auth_store(client_config);
 
     let bridge_config = resolve_bridge_config(&settings, &api_key, use_bearer_auth, is_headless);
     if let Some(cfg) = bridge_config.as_ref() {
@@ -697,8 +704,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Build model registry for dynamic model/provider resolution.
+    // The registry is pre-populated with a hardcoded snapshot and enriched
+    // from the models.dev cache if available.
+    let model_registry = {
+        let mut reg = claurst_api::ModelRegistry::new();
+        let cache_path = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("claurst")
+            .join("models.json");
+        reg.load_cache(&cache_path);
+        Arc::new(reg)
+    };
+
     // Build query config
-    let mut query_config = claurst_query::QueryConfig::from_config(&config);
+    let mut query_config = claurst_query::QueryConfig::from_config_with_registry(&config, &model_registry);
+    query_config.model_registry = Some(model_registry.clone());
     query_config.max_turns = cli.max_turns;
     query_config.system_prompt = Some(system_prompt);
     query_config.append_system_prompt = None;
@@ -720,7 +741,8 @@ async fn main() -> anyhow::Result<()> {
         query_config.fallback_model = Some(fb.clone());
     }
     // Wire in the provider registry so non-Anthropic providers can be dispatched.
-    query_config.provider_registry = Some(std::sync::Arc::new(provider_registry));
+    let provider_registry = std::sync::Arc::new(provider_registry);
+    query_config.provider_registry = Some(provider_registry.clone());
 
     // Wire in the named agent (--agent flag).
     // Merge built-in default agents with user-defined agents (user wins on collision).
@@ -778,6 +800,7 @@ async fn main() -> anyhow::Result<()> {
             cli.resume,
             bridge_config,
             !api_key.is_empty(),
+            model_registry,
         )
         .await
     };
@@ -1124,6 +1147,7 @@ async fn run_interactive(
     resume_id: Option<String>,
     bridge_config: Option<claurst_bridge::BridgeConfig>,
     has_credentials: bool,
+    model_registry: Arc<claurst_api::ModelRegistry>,
 ) -> anyhow::Result<()> {
     use claurst_commands::{execute_command, CommandContext, CommandResult};
     use claurst_bridge::{BridgeOutbound, TuiBridgeEvent};
@@ -1131,6 +1155,7 @@ async fn run_interactive(
     use claurst_tui::{
         bridge_state::BridgeConnectionState, notifications::NotificationKind,
         render::render_app, restore_terminal, setup_terminal, App,
+        device_auth_dialog::DeviceAuthEvent,
     };
     use crossterm::event::{self, Event, KeyCode};
     use std::time::Duration;
@@ -1154,7 +1179,9 @@ async fn run_interactive(
             Err(e) => {
                 eprintln!("Warning: could not load session {}: {}", id, e);
                 let mut session =
-                    claurst_core::history::ConversationSession::new(config.effective_model().to_string());
+                    claurst_core::history::ConversationSession::new(
+                        claurst_api::effective_model_for_config(&config, &model_registry),
+                    );
                 session.id = tool_ctx.session_id.clone();
                 session.working_dir = Some(tool_ctx.working_dir.display().to_string());
                 session
@@ -1162,7 +1189,9 @@ async fn run_interactive(
         }
     } else {
         let mut session =
-            claurst_core::history::ConversationSession::new(config.effective_model().to_string());
+            claurst_core::history::ConversationSession::new(
+                claurst_api::effective_model_for_config(&config, &model_registry),
+            );
         session.id = tool_ctx.session_id.clone();
         session.working_dir = Some(tool_ctx.working_dir.display().to_string());
         session
@@ -1173,6 +1202,7 @@ async fn run_interactive(
     if !session.model.is_empty() {
         live_config.model = Some(session.model.clone());
     }
+    tool_ctx.config = live_config.clone();
 
     // Set up terminal
     let mut terminal = setup_terminal()?;
@@ -1187,6 +1217,45 @@ async fn run_interactive(
             claurst_core::effort::EffortLevel::Max    => TuiEL::Max,
         };
     }
+    app.provider_registry = base_query_config.provider_registry.clone();
+
+    // Background: refresh the model registry from models.dev.
+    // The fetched JSON is saved as a cache file; the App will reload it from
+    // disk whenever the /model picker opens.
+    {
+        let cache_path = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("claurst")
+            .join("models.json");
+        tokio::spawn(async move {
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let url = std::env::var("MODELS_DEV_URL")
+                .unwrap_or_else(|_| "https://models.dev/api.json".to_string());
+            if let Ok(resp) = client
+                .get(&url)
+                .header("User-Agent", "Claurst/0.0.6")
+                .send()
+                .await
+            {
+                if resp.status().is_success() {
+                    if let Ok(text) = resp.text().await {
+                        let _ = std::fs::create_dir_all(
+                            cache_path.parent().unwrap_or(std::path::Path::new(".")),
+                        );
+                        let _ = std::fs::write(&cache_path, &text);
+                        tracing::info!("Models cache refreshed from models.dev");
+                    }
+                }
+            }
+        });
+    }
+
     app.config.project_dir = Some(tool_ctx.working_dir.clone());
     app.attach_turn_diff_state(tool_ctx.file_history.clone(), tool_ctx.current_turn.clone());
     if let Some(manager) = tool_ctx.mcp_manager.clone() {
@@ -1213,9 +1282,14 @@ async fn run_interactive(
         }
     }
 
-    // Show onboarding: provider setup if no credentials, welcome tour if first run.
+    // Set agent mode from the --agent flag (carried on query_config).
+    if let Some(ref agent_name) = base_query_config.agent_name {
+        app.agent_mode = Some(agent_name.clone());
+    }
+
+    // Show onboarding: status hint if no credentials, welcome tour if first run.
     if !has_credentials {
-        app.onboarding_dialog.show_provider_setup();
+        app.status_message = Some("No provider configured. Run /connect to set one up.".to_string());
     } else if !settings.has_completed_onboarding {
         app.onboarding_dialog.show();
     }
@@ -1363,6 +1437,10 @@ async fn run_interactive(
         let _ = update_tx.send(version).await;
     });
 
+    // Device code / OAuth auth channel — background tasks send events here
+    // so the main loop can update the device_auth_dialog state.
+    let (device_auth_tx, mut device_auth_rx) = mpsc::channel::<DeviceAuthEvent>(8);
+
     'main: loop {
         app.frame_count = app.frame_count.wrapping_add(1);
 
@@ -1413,16 +1491,44 @@ async fn run_interactive(
                         break 'main;
                     }
 
-                    // Enter => submit input
-                    if key.code == KeyCode::Enter && !app.is_streaming {
-                        // If a slash-command suggestion is active, accept it
-                        // and wait for the next Enter to actually submit.
+                    // Enter => submit input (but NOT when ANY dialog/overlay is open —
+                    // dialogs handle their own Enter in handle_key_event).
+                    let any_dialog_open = app.connect_dialog.visible
+                        || app.key_input_dialog.visible
+                        || app.device_auth_dialog.visible
+                        || app.command_palette.visible
+                        || app.model_picker.visible
+                        || app.onboarding_dialog.visible
+                        || app.bypass_permissions_dialog.visible
+                        || app.settings_screen.visible
+                        || app.export_dialog.visible
+                        || app.theme_screen.visible
+                        || app.privacy_screen.visible
+                        || app.stats_dialog.open
+                        || app.invalid_config_dialog.visible
+                        || app.context_viz.visible
+                        || app.mcp_approval.visible
+                        || app.session_browser.visible
+                        || app.session_branching.visible
+                        || app.tasks_overlay.visible
+                        || app.mcp_view.open
+                        || app.agents_menu.open
+                        || app.diff_viewer.open
+                        || app.help_overlay.visible
+                        || app.history_search_overlay.visible
+                        || app.rewind_flow.visible
+                        || app.show_help
+                        || app.context_menu_state.is_some()
+                        || app.permission_request.is_some()
+                        || app.global_search.open;
+                    if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                        // If a slash-command suggestion is active, accept and execute immediately.
                         if !app.prompt_input.suggestions.is_empty()
                             && app.prompt_input.suggestion_index.is_some()
                             && app.prompt_input.text.starts_with('/')
                         {
                             app.prompt_input.accept_suggestion();
-                            continue;
+                            // Fall through to submit — no second Enter needed
                         }
 
                         let input = app.take_input();
@@ -1537,6 +1643,8 @@ async fn run_interactive(
                                     app.replace_messages(messages.clone());
                                     cmd_ctx.config.model = Some(session.model.clone());
                                     app.config.model = Some(session.model.clone());
+                                    tool_ctx.config.model = Some(session.model.clone());
+                                    app.model_name = session.model.clone();
                                     tool_ctx.session_id = session.id.clone();
                                     tool_ctx.file_history = Arc::new(ParkingMutex::new(
                                         claurst_core::file_history::FileHistory::new(),
@@ -1588,6 +1696,7 @@ async fn run_interactive(
                                 }
                                 Some(CommandResult::ConfigChange(new_cfg)) => {
                                     cmd_ctx.config = new_cfg.clone();
+                                    tool_ctx.config = new_cfg.clone();
                                     app.config = new_cfg.clone();
                                     // Sync model name shown in the TUI header.
                                     if let Some(ref model) = new_cfg.model {
@@ -1608,6 +1717,7 @@ async fn run_interactive(
                                 }
                                 Some(CommandResult::ConfigChangeMessage(new_cfg, msg)) => {
                                     cmd_ctx.config = new_cfg.clone();
+                                    tool_ctx.config = new_cfg.clone();
                                     // Sync model name + fast_mode visual indicator.
                                     if let Some(ref model) = new_cfg.model {
                                         app.model_name = model.clone();
@@ -1768,7 +1878,7 @@ async fn run_interactive(
                         let tools_arc_clone = tools_arc.clone();
                         let ctx_clone = tool_ctx.clone();
                         let mut qcfg = base_query_config.clone();
-                        qcfg.model = cmd_ctx.config.effective_model().to_string();
+                        qcfg.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
                         qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
                         qcfg.append_system_prompt = cmd_ctx.config.append_system_prompt.clone();
                         qcfg.system_prompt = base_query_config.system_prompt.clone();
@@ -1808,6 +1918,11 @@ async fn run_interactive(
                     }
 
                     app.handle_key_event(key);
+                    cmd_ctx.config = app.config.clone();
+                    tool_ctx.config = app.config.clone();
+                    if !app.model_name.is_empty() {
+                        session.model = app.model_name.clone();
+                    }
                     if !app.is_streaming && app.messages.len() < messages.len() {
                         messages = app.messages.clone();
                         session.messages = messages.clone();
@@ -2029,7 +2144,7 @@ async fn run_interactive(
                         let tools_arc_clone = tools_arc.clone();
                         let ctx_clone = tool_ctx.clone();
                         let mut qcfg = base_query_config.clone();
-                        qcfg.model = cmd_ctx.config.effective_model().to_string();
+                        qcfg.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
                         qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
                         let tracker = cost_tracker.clone();
                         let tx = event_tx.clone();
@@ -2137,7 +2252,7 @@ async fn run_interactive(
                 let tools_arc_clone = tools_arc.clone();
                 let ctx_clone = tool_ctx.clone();
                 let mut qcfg = base_query_config.clone();
-                qcfg.model = cmd_ctx.config.effective_model().to_string();
+                qcfg.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
                 qcfg.max_tokens = cmd_ctx.config.effective_max_tokens();
                 let tracker = cost_tracker.clone();
                 let tx = event_tx.clone();
@@ -2183,6 +2298,103 @@ async fn run_interactive(
             }
         }
 
+        // ---- Device code / OAuth auth: spawn background task when pending ----
+        if let Some(provider_id) = app.device_auth_pending.take() {
+            let _tx = device_auth_tx.clone();
+            match provider_id.as_str() {
+                "github-copilot" => {
+                    let tx2 = device_auth_tx.clone();
+                    // Claurst's own registered GitHub OAuth App
+                    const COPILOT_CLIENT_ID: &str = "Iv23li4E44oPZR1huPU9";
+                    tokio::spawn(async move {
+                        // Step 1: Request device code
+                        match claurst_core::device_code::request_device_code(
+                            COPILOT_CLIENT_ID,
+                            "read:user",
+                            "https://github.com/login/device/code",
+                        ).await {
+                            Ok(resp) => {
+                                let _ = tx2.send(DeviceAuthEvent::GotCode {
+                                    user_code: resp.user_code,
+                                    verification_uri: resp.verification_uri,
+                                    device_code: resp.device_code.clone(),
+                                    interval: resp.interval,
+                                }).await;
+                                // Step 2: Poll for access token
+                                match claurst_core::device_code::poll_for_token(
+                                    COPILOT_CLIENT_ID,
+                                    &resp.device_code,
+                                    "https://github.com/login/oauth/access_token",
+                                    resp.interval,
+                                    300,
+                                ).await {
+                                    Ok(token) => {
+                                        let _ = tx2.send(DeviceAuthEvent::TokenReceived(token)).await;
+                                    }
+                                    Err(e) => {
+                                        let _ = tx2.send(DeviceAuthEvent::Error(e)).await;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx2.send(DeviceAuthEvent::Error(e)).await;
+                            }
+                        }
+                    });
+                }
+                "anthropic" => {
+                    let tx2 = device_auth_tx.clone();
+                    // Anthropic OAuth requires a registered application.
+                    // Claurst does not have its own registered OAuth app with Anthropic.
+                    // Users should use an API key from console.anthropic.com instead.
+                    tokio::spawn(async move {
+                        let _ = tx2.send(DeviceAuthEvent::Error(
+                            "Anthropic OAuth requires a registered application.\n\
+                             Use an API key instead: console.anthropic.com/settings/keys".to_string()
+                        )).await;
+                    });
+                }
+                _ => {
+                    // Unknown provider for device auth — should not happen
+                    app.device_auth_dialog
+                        .set_error(format!("Unsupported auth flow for {}", provider_id));
+                }
+            }
+        }
+
+        // ---- Drain device auth events from the background task ----
+        while let Ok(evt) = device_auth_rx.try_recv() {
+            match evt {
+                DeviceAuthEvent::GotCode {
+                    user_code,
+                    verification_uri,
+                    device_code,
+                    interval,
+                } => {
+                    // Auto-copy the user code to clipboard
+                    let _ = claurst_tui::try_copy_to_clipboard(&user_code);
+
+                    // Auto-open the verification URL in the browser
+                    let _ = open::that(&verification_uri);
+
+                    app.device_auth_dialog
+                        .set_code(user_code, verification_uri, device_code, interval);
+
+                    app.notifications.push(
+                        claurst_tui::NotificationKind::Info,
+                        "Code copied to clipboard & browser opened.".to_string(),
+                        Some(4),
+                    );
+                }
+                DeviceAuthEvent::TokenReceived(token) => {
+                    app.device_auth_dialog.set_success(token);
+                }
+                DeviceAuthEvent::Error(msg) => {
+                    app.device_auth_dialog.set_error(msg);
+                }
+            }
+        }
+
         // Check if query task is done; sync messages from the task
         let task_finished = current_query
             .as_ref()
@@ -2197,7 +2409,7 @@ async fn run_interactive(
                 messages = msgs_arc.lock().await.clone();
                 session.messages = messages.clone();
                 session.updated_at = chrono::Utc::now();
-                session.model = cmd_ctx.config.effective_model().to_string();
+                session.model = claurst_api::effective_model_for_config(&cmd_ctx.config, &model_registry);
                 session.working_dir = Some(tool_ctx.working_dir.display().to_string());
                 app.is_streaming = false;
                 app.status_message = None;
@@ -2372,7 +2584,7 @@ async fn auth_status(json_output: bool) {
         .or_else(|| {
             oauth_tokens.as_ref().map(|tokens| {
                 if tokens.uses_bearer_auth() {
-                    "Claude.ai Account".to_string()
+                    "Claurst Account".to_string()
                 } else {
                     "Console Account".to_string()
                 }
@@ -2518,10 +2730,10 @@ async fn auth_logout() {
 /// Helper: convert `Option<String>` to a JSON string or null.
 fn subscription_label(subscription_type: Option<&str>) -> Option<String> {
     match subscription_type? {
-        "enterprise" => Some("Claude Enterprise Account".to_string()),
-        "team" => Some("Claude Team Account".to_string()),
-        "max" => Some("Claude Max Account".to_string()),
-        "pro" => Some("Claude Pro Account".to_string()),
+        "enterprise" => Some("Claurst Enterprise Account".to_string()),
+        "team" => Some("Claurst Team Account".to_string()),
+        "max" => Some("Claurst Max Account".to_string()),
+        "pro" => Some("Claurst Pro Account".to_string()),
         other if !other.is_empty() => Some(format!("{} Account", other)),
         _ => None,
     }

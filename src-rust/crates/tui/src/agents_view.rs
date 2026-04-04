@@ -65,7 +65,7 @@ pub struct AgentInfo {
     pub last_output: Option<String>,
 }
 
-/// A defined agent (from .claude/agents/*.md or plugin).
+/// A defined agent (from .claurst/agents/*.md or plugin).
 #[derive(Debug, Clone)]
 pub struct AgentDefinition {
     /// Backing markdown file path.
@@ -327,7 +327,7 @@ impl AgentsMenuState {
             .original_index
             .and_then(|idx| self.definitions.get(idx).map(|def| def.file_path.clone()))
             .unwrap_or_else(|| {
-                root.join(".claude")
+                root.join(".claurst")
                     .join("agents")
                     .join(format!("{}.md", slugify_agent_name(&self.editor.name)))
             });
@@ -359,12 +359,12 @@ impl Default for AgentsMenuState {
 // Data loading
 // ---------------------------------------------------------------------------
 
-/// Load agent definitions from `.claude/agents/` in project root and home dir.
+/// Load agent definitions from `.claurst/agents/` in project root and home dir.
 pub fn load_agent_definitions(project_root: &std::path::Path) -> Vec<AgentDefinition> {
     let mut defs = Vec::new();
     let dirs = [
-        dirs::home_dir().map(|h| h.join(".claude").join("agents")),
-        Some(project_root.join(".claude").join("agents")),
+        dirs::home_dir().map(|h| h.join(".claurst").join("agents")),
+        Some(project_root.join(".claurst").join("agents")),
     ];
 
     for dir_opt in &dirs {

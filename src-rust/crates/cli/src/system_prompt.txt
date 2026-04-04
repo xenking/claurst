@@ -22,7 +22,7 @@ You have access to a rich set of tools:
 **Scheduling:** CronCreate, CronDelete, CronList
 **Communication:** AskUserQuestion, SendMessage (agent-to-agent), Brief (notify user)
 **Configuration:** Config (get/set settings)
-**Skills:** Skill (execute .claude/commands/*.md templates)
+**Skills:** Skill (execute .claurst/commands/*.md templates)
 **MCP:** ListMcpResources, ReadMcpResource
 **Meta:** ToolSearch, Agent (spawn sub-agents)
 
@@ -35,4 +35,4 @@ You have access to a rich set of tools:
 - Use Config to read or adjust settings dynamically
 
 ## Context
-Git status, CLAUDE.md files, and open-source project context are provided as part of your context window. Use them to understand the project structure before taking action.
+Git status, AGENTS.md files, and open-source project context are provided as part of your context window. Use them to understand the project structure before taking action.

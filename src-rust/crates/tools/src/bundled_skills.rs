@@ -101,7 +101,7 @@ $ARGUMENTS_SUFFIX"#,
     // -----------------------------------------------------------------------
     BundledSkill {
         name: "remember",
-        description: "Review auto-memory entries and propose promotions to CLAUDE.md, CLAUDE.local.md, or shared memory.",
+        description: "Review auto-memory entries and propose promotions to AGENTS.md, AGENTS.local.md, or shared memory.",
         aliases: &["mem", "save"],
         when_to_use: Some("When the user wants to review, organise, or promote their auto-memory entries."),
         argument_hint: Some("[additional context]"),
@@ -114,20 +114,20 @@ grouped by action type. Do NOT apply changes — present proposals for user appr
 ## Steps
 
 ### 1. Gather all memory layers
-Read CLAUDE.md and CLAUDE.local.md from the project root (if they exist).
+Read AGENTS.md and AGENTS.local.md from the project root (if they exist).
 Your auto-memory content is already in your system prompt — review it there.
 
 ### 2. Classify each auto-memory entry
 
 | Destination | What belongs there |
 |---|---|
-| **CLAUDE.md** | Project conventions all contributors should follow |
-| **CLAUDE.local.md** | Personal instructions specific to this user |
+| **AGENTS.md** | Project conventions all contributors should follow |
+| **AGENTS.local.md** | Personal instructions specific to this user |
 | **Stay in auto-memory** | Working notes, temporary context, uncertain patterns |
 
 ### 3. Identify cleanup opportunities
-- **Duplicates**: auto-memory entries already in CLAUDE.md → propose removing
-- **Outdated**: CLAUDE.md entries contradicted by newer auto-memory → propose updating
+- **Duplicates**: auto-memory entries already in AGENTS.md → propose removing
+- **Outdated**: AGENTS.md entries contradicted by newer auto-memory → propose updating
 - **Conflicts**: contradictions between layers → propose resolution
 
 ### 4. Present the report
@@ -171,9 +171,9 @@ $ARGUMENTS
 ## Settings Reference
 
 Settings files are in:
-- User:    ~/.claude/settings.json
-- Project: .claude/settings.json
-- Local:   .claude/settings.local.json
+- User:    ~/.claurst/settings.json
+- Project: .claurst/settings.json
+- Local:   .claurst/settings.local.json
 
 Read the relevant files before making any changes."#,
         allowed_tools: Some(&["Read", "Grep", "Glob"]),
@@ -288,9 +288,9 @@ Modify Claurst configuration by updating settings.json files.
 
 | File | Scope | Use For |
 |------|-------|---------|
-| `~/.claude/settings.json` | Global | Personal preferences for all projects |
-| `.claude/settings.json` | Project | Team-wide hooks, permissions, plugins |
-| `.claude/settings.local.json` | Project (local) | Personal overrides for this project |
+| `~/.claurst/settings.json` | Global | Personal preferences for all projects |
+| `.claurst/settings.json` | Project | Team-wide hooks, permissions, plugins |
+| `.claurst/settings.local.json` | Project (local) | Personal overrides for this project |
 
 Settings load in order: user → project → local (later overrides earlier).
 
