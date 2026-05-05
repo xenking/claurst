@@ -58,6 +58,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
+use tracing::debug;
 use unicode_width::UnicodeWidthStr;
 
 // Spinner frames matching the TypeScript SpinnerGlyph: platform-specific base
@@ -952,6 +953,7 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     let content_height = lines.len();
     let visible_height = msg_area.height as usize;  // no borders, full height available
     let max_scroll = content_height.saturating_sub(visible_height);
+    let previous_max_scroll = app.last_render_max_scroll_offset.get();
     app.last_render_max_scroll_offset.set(max_scroll);
     // scroll_offset counts lines above the bottom (0 = at bottom).
     // ratatui scroll() takes an absolute top-row index, so convert:
@@ -961,6 +963,18 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         max_scroll.saturating_sub(app.scroll_offset)
     };
+    if previous_max_scroll != max_scroll || app.scroll_offset > max_scroll {
+        debug!(
+            content_height,
+            visible_height,
+            max_scroll,
+            previous_max_scroll,
+            requested_offset = app.scroll_offset,
+            auto_scroll = app.auto_scroll,
+            scroll_top = scroll,
+            "transcript scroll geometry"
+        );
+    }
 
     let mut visible_rows: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
     let mut thinking_rows: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();

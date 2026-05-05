@@ -2489,27 +2489,62 @@ impl App {
         self.scroll_accel.round() as usize
     }
 
-    fn scroll_transcript_up(&mut self, rows: usize) {
+    fn scroll_transcript_up(&mut self, source: &'static str, rows: usize) {
+        let before_offset = self.scroll_offset;
+        let before_auto_scroll = self.auto_scroll;
         let max_scroll = self.last_render_max_scroll_offset.get();
         if max_scroll == 0 {
             self.scroll_offset = 0;
             self.auto_scroll = true;
+            debug!(
+                source,
+                rows,
+                before_offset,
+                after_offset = self.scroll_offset,
+                max_scroll,
+                before_auto_scroll,
+                after_auto_scroll = self.auto_scroll,
+                "transcript scroll up ignored; content fits viewport"
+            );
             return;
         }
 
         self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max_scroll);
         self.auto_scroll = false;
+        debug!(
+            source,
+            rows,
+            before_offset,
+            after_offset = self.scroll_offset,
+            max_scroll,
+            before_auto_scroll,
+            after_auto_scroll = self.auto_scroll,
+            "transcript scroll up"
+        );
     }
 
-    fn scroll_transcript_down(&mut self, rows: usize) {
+    fn scroll_transcript_down(&mut self, source: &'static str, rows: usize) {
+        let before_offset = self.scroll_offset;
+        let before_auto_scroll = self.auto_scroll;
+        let max_scroll = self.last_render_max_scroll_offset.get();
         self.scroll_offset = self
             .scroll_offset
-            .min(self.last_render_max_scroll_offset.get())
+            .min(max_scroll)
             .saturating_sub(rows);
         if self.scroll_offset == 0 {
             self.auto_scroll = true;
             self.new_messages_while_scrolled = 0;
         }
+        debug!(
+            source,
+            rows,
+            before_offset,
+            after_offset = self.scroll_offset,
+            max_scroll,
+            before_auto_scroll,
+            after_auto_scroll = self.auto_scroll,
+            "transcript scroll down"
+        );
     }
 
     pub fn uses_oauth_usage_limits(&self) -> bool {
@@ -3876,11 +3911,11 @@ impl App {
             // ---- Message boundary navigation (Alt+Up/Alt+Down) ----------
             KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                 // Jump up by ~20 lines (approximate message boundary).
-                self.scroll_transcript_up(20);
+                self.scroll_transcript_up("key.alt_up", 20);
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
                 // Jump down by ~20 lines (approximate message boundary).
-                self.scroll_transcript_down(20);
+                self.scroll_transcript_down("key.alt_down", 20);
             }
 
             // ---- Input history navigation ------------------------------
@@ -3903,10 +3938,10 @@ impl App {
 
             // ---- Scroll ------------------------------------------------
             KeyCode::PageUp => {
-                self.scroll_transcript_up(10);
+                self.scroll_transcript_up("key.page_up", 10);
             }
             KeyCode::PageDown => {
-                self.scroll_transcript_down(10);
+                self.scroll_transcript_down("key.page_down", 10);
             }
 
             // ---- Toggle last thinking block (t key) -------------------
@@ -4344,11 +4379,11 @@ impl App {
                 false
             }
             "scrollUp" => {
-                self.scroll_transcript_up(10);
+                self.scroll_transcript_up("keybinding.scroll_up", 10);
                 false
             }
             "scrollDown" => {
-                self.scroll_transcript_down(10);
+                self.scroll_transcript_down("keybinding.scroll_down", 10);
                 false
             }
             "yes" => {
@@ -4440,12 +4475,12 @@ impl App {
             }
             "previousMessage" => {
                 // Alt+←: Navigate to previous message in transcript
-                self.scroll_transcript_up(5);
+                self.scroll_transcript_up("keybinding.previous_message", 5);
                 false
             }
             "nextMessage" => {
                 // Alt+→: Navigate to next message in transcript
-                self.scroll_transcript_down(5);
+                self.scroll_transcript_down("keybinding.next_message", 5);
                 false
             }
             "jumpToNextError" => {
@@ -4979,13 +5014,13 @@ impl App {
                 // Don't consume Ctrl+Scroll — let the terminal handle zoom.
                 if !mouse_event.modifiers.contains(KeyModifiers::CONTROL) {
                     let step = self.scroll_step();
-                    self.scroll_transcript_up(step);
+                    self.scroll_transcript_up("mouse.wheel_up", step);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if !mouse_event.modifiers.contains(KeyModifiers::CONTROL) {
                     let step = self.scroll_step();
-                    self.scroll_transcript_down(step);
+                    self.scroll_transcript_down("mouse.wheel_down", step);
                 }
             }
             // ---- Right-click context menu ----------------------------------
