@@ -4354,4 +4354,45 @@ mod tests {
                 "Preset {} executor_model must be provider/model", preset.name);
         }
     }
+
+    #[test]
+    fn image_source_base64_data_reads_path() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        std::io::Write::write_all(&mut file, b"image bytes").expect("write image");
+        let source = ImageSource {
+            source_type: "file".to_string(),
+            media_type: Some("image/png".to_string()),
+            data: None,
+            url: None,
+            path: Some(file.path().to_string_lossy().to_string()),
+        };
+
+        assert_eq!(source.base64_data().as_deref(), Some("aW1hZ2UgYnl0ZXM="));
+    }
+
+    #[test]
+    fn image_source_base64_data_prefers_inline_data() {
+        let source = ImageSource {
+            source_type: "base64".to_string(),
+            media_type: Some("image/png".to_string()),
+            data: Some("inline".to_string()),
+            url: None,
+            path: Some("/definitely/missing.png".to_string()),
+        };
+
+        assert_eq!(source.base64_data().as_deref(), Some("inline"));
+    }
+
+    #[test]
+    fn image_source_base64_data_missing_path_is_none() {
+        let source = ImageSource {
+            source_type: "file".to_string(),
+            media_type: Some("image/png".to_string()),
+            data: None,
+            url: None,
+            path: Some("/definitely/missing.png".to_string()),
+        };
+
+        assert!(source.base64_data().is_none());
+    }
 }

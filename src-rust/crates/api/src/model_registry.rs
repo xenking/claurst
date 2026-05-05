@@ -454,6 +454,9 @@ impl ModelRegistry {
 
         let small_priority: &[&str] = &[
             "claude-haiku-4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+            "gpt-5.1-codex-mini",
             "gpt-4o-mini",
             "gemini-2.5-flash",
             "gemini-2.0-flash",
@@ -683,6 +686,16 @@ mod tests {
             .get("codex", "gpt-5.5")
             .expect("codex/gpt-5.5 should be registered");
         assert_eq!(entry.info.context_window, 272_000);
+    }
+
+    #[test]
+    fn codex_small_model_prefers_mini_not_frontier() {
+        let registry = ModelRegistry::new();
+
+        assert_eq!(
+            registry.best_small_model_for_provider("openai-codex").as_deref(),
+            Some("gpt-5.4-mini")
+        );
     }
 }
 

@@ -88,6 +88,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("resume", "Resume a previous session"),
     ("review", "Review changes (git diff)"),
     ("rewind", "Rewind to an earlier turn"),
+    ("rtk", "Configure RTK command rewriting"),
     ("session", "Browse and manage sessions"),
     ("settings", "Open settings"),
     ("stats", "Open token and cost stats"),
@@ -673,7 +674,7 @@ pub struct App {
     pub has_credentials: bool,
     /// Current effort level (controls extended-thinking budget_tokens).
     pub effort_level: EffortLevel,
-    /// Whether fast mode is currently active (model locked to FAST_MODE_MODEL).
+    /// Whether fast transport mode is currently active (does not change model).
     pub fast_mode: bool,
     /// Active speech mode: None = normal, Some("caveman") / Some("rocky").
     pub speech_mode: Option<String>,
@@ -1783,6 +1784,55 @@ impl App {
         }
     }
 
+    fn open_selected_memory_file(&mut self) {
+        let Some(path) = self
+            .memory_file_selector
+            .selected_path()
+            .map(std::path::PathBuf::from)
+        else {
+            self.status_message = Some("No memory file selected.".to_string());
+            return;
+        };
+
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                self.status_message = Some(format!("Could not create {}: {}", parent.display(), err));
+                return;
+            }
+        }
+        if !path.exists() {
+            if let Err(err) = std::fs::write(&path, "") {
+                self.status_message = Some(format!("Could not create {}: {}", path.display(), err));
+                return;
+            }
+        }
+
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| {
+                if cfg!(target_os = "macos") {
+                    "open".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+
+        let mut command = std::process::Command::new(&editor);
+        if cfg!(target_os = "macos") && editor == "open" {
+            command.arg("-t");
+        }
+        let result = command.arg(&path).spawn();
+        self.memory_file_selector.close();
+        match result {
+            Ok(_) => {
+                self.status_message = Some(format!("Opened memory file: {}", path.display()));
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Could not open {}: {}", path.display(), err));
+            }
+        }
+    }
+
     /// Update the context window size from the model registry for the current model.
     pub fn refresh_context_window_size(&mut self) {
         let provider = self.config.provider.as_deref().unwrap_or("anthropic");
@@ -1870,7 +1920,26 @@ impl App {
     /// Handle slash commands that should open UI screens rather than execute
     /// as normal commands. Returns `true` if the command was intercepted.
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
-        if cmd == "mcp" && !args.trim().is_empty() {
+        // Let argument-bearing commands that mutate config or perform actions
+        // go through the slash-command executor instead of opening a picker.
+        if !args.trim().is_empty()
+            && matches!(
+                cmd,
+                "effort"
+                    | "fast"
+                    | "speed"
+                    | "mcp"
+                    | "memory"
+                    | "model"
+                    | "resume"
+                    | "rtk"
+                    | "session"
+                    | "theme"
+                    | "vi"
+                    | "vim"
+                    | "voice"
+            )
+        {
             return false;
         }
         self.intercept_slash_command(cmd)
@@ -1990,10 +2059,9 @@ impl App {
                 true
             }
             "fast" => {
-                self.fast_mode = !self.fast_mode;
-                let status = if self.fast_mode { "enabled" } else { "disabled" };
-                self.status_message = Some(format!("Fast mode {}.", status));
-                true
+                // Let the slash-command executor persist and apply the
+                // transport-level fast-mode flag. It must not switch model.
+                false
             }
             "plan" => {
                 use claurst_core::config::PermissionMode;
@@ -2394,6 +2462,35 @@ impl App {
         self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
         self.on_new_message();
+    }
+
+    pub fn paste_clipboard_into_prompt(&mut self) -> bool {
+        use crate::image_paste::{read_clipboard_image, read_clipboard_text, read_primary_text};
+
+        if let Some(img) = read_clipboard_image() {
+            let label = img.label.clone();
+            let dims = img.dimensions;
+            self.prompt_input.add_image(img);
+            let msg = if let Some((w, h)) = dims {
+                format!("Image attached: {} ({}x{})", label, w, h)
+            } else {
+                format!("Image attached: {}", label)
+            };
+            self.notifications.push(NotificationKind::Info, msg, Some(3));
+            return true;
+        }
+
+        if let Some(text) = read_clipboard_text().or_else(read_primary_text) {
+            self.paste_text_into_prompt(&text);
+            return true;
+        }
+
+        false
+    }
+
+    pub fn paste_text_into_prompt(&mut self, text: &str) {
+        self.prompt_input.paste(text);
+        self.refresh_prompt_input();
     }
 
     /// Push a synthetic system annotation into the conversation pane.
@@ -3122,11 +3219,6 @@ impl App {
                 KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => self.model_picker.select_next(),
                 KeyCode::Enter => {
                     if let Some((model_id, effort)) = self.model_picker.confirm() {
-                        // If user picked a model other than the fast-mode model
-                        // while fast mode was active, turn fast mode off.
-                        if self.fast_mode && !self.model_picker.is_selected_fast_mode_model(&model_id) {
-                            self.fast_mode = false;
-                        }
                         if let Some(e) = effort {
                             self.effort_level = e;
                         }
@@ -3326,15 +3418,14 @@ impl App {
             return false;
         }
 
-        // Memory file selector intercepts navigation and Esc
+        // Memory file selector intercepts navigation and selection
         if self.memory_file_selector.visible {
             match key.code {
                 KeyCode::Esc => self.memory_file_selector.close(),
                 KeyCode::Up => self.memory_file_selector.select_prev(),
                 KeyCode::Down => self.memory_file_selector.select_next(),
-                KeyCode::Enter => {
-                    // Selection acknowledged — consumer can read selected_path()
-                    self.memory_file_selector.close();
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.open_selected_memory_file();
                 }
                 _ => {}
             }
@@ -3548,6 +3639,52 @@ impl App {
             }
         }
 
+        // ---- Cmd+C — macOS copy without quitting ------------------------
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::SUPER) {
+            let sel_text = self.selection_text.borrow().clone();
+            if self.selection_anchor.is_some() && !sel_text.is_empty() {
+                let copied = crate::image_paste::write_clipboard_text(&sel_text);
+                self.selection_anchor = None;
+                self.selection_focus = None;
+                *self.selection_text.borrow_mut() = String::new();
+                if copied {
+                    self.notifications.push(NotificationKind::Info, "Copied to clipboard".to_string(), Some(2));
+                } else {
+                    self.notifications.push(NotificationKind::Warning, "Clipboard unavailable".to_string(), Some(3));
+                }
+            } else {
+                let last = self.messages.iter().rev()
+                    .find(|m| m.role == Role::Assistant)
+                    .map(|m| m.get_all_text());
+                if let Some(text) = last {
+                    if try_copy_to_clipboard(&text) {
+                        self.notifications.push(NotificationKind::Info, "Copied last assistant message".to_string(), Some(2));
+                    } else {
+                        self.notifications.push(NotificationKind::Warning, "Clipboard unavailable".to_string(), Some(3));
+                    }
+                } else {
+                    self.notifications.push(NotificationKind::Warning, "No selection or assistant message to copy".to_string(), Some(3));
+                }
+            }
+            return false;
+        }
+
+        // ---- Ctrl/Cmd+V — clipboard paste (image first, then text fallback) ----
+        // Run before keybindings so unbound Cmd/Ctrl+V cannot swallow image paste.
+        if key.code == KeyCode::Char('v')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
+            && !matches!(
+                self.prompt_input.vim_mode,
+                crate::prompt_input::VimMode::Normal
+                    | crate::prompt_input::VimMode::Visual
+                    | crate::prompt_input::VimMode::VisualBlock
+            )
+        {
+            let _ = self.paste_clipboard_into_prompt();
+            return false;
+        }
+
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
         let key_context = self.current_key_context();
         if let Some(keystroke) = key_event_to_keystroke(&key) {
@@ -3565,7 +3702,7 @@ impl App {
         }
 
         // Clear any active text selection on key press (except Ctrl+C which copies it).
-        let is_copy = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_copy = key.code == KeyCode::Char('c') && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER));
         if !is_copy && self.selection_anchor.is_some() {
             self.selection_anchor = None;
             self.selection_focus = None;
@@ -3642,11 +3779,12 @@ impl App {
             return false;
         }
 
-        // ---- Ctrl+V — clipboard paste (image first, then text fallback) ----
+        // ---- Ctrl/Cmd+V — clipboard paste (image first, then text fallback) ----
         // Only fires when NOT in vim Normal/Visual/VisualBlock mode (where \x16 is
         // already consumed by the vim handler above to enter VisualBlock mode).
         if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
             && !matches!(
                 self.prompt_input.vim_mode,
                 crate::prompt_input::VimMode::Normal
@@ -3654,21 +3792,7 @@ impl App {
                     | crate::prompt_input::VimMode::VisualBlock
             )
         {
-            use crate::image_paste::{read_clipboard_image, read_clipboard_text, read_primary_text};
-            if let Some(img) = read_clipboard_image() {
-                let label = img.label.clone();
-                let dims = img.dimensions;
-                self.prompt_input.add_image(img);
-                let msg = if let Some((w, h)) = dims {
-                    format!("Image attached: {} ({}x{})", label, w, h)
-                } else {
-                    format!("Image attached: {}", label)
-                };
-                self.notifications.push(NotificationKind::Info, msg, Some(3));
-            } else if let Some(text) = read_clipboard_text().or_else(read_primary_text) {
-                self.prompt_input.paste(&text);
-                self.refresh_prompt_input();
-            }
+            let _ = self.paste_clipboard_into_prompt();
             return false;
         }
 
@@ -3827,7 +3951,12 @@ impl App {
             }
 
             // ---- Text entry (blocked while streaming) ------------------
-            KeyCode::Char(c) if !self.is_streaming => {
+            KeyCode::Char(c)
+                if !self.is_streaming
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::SUPER) =>
+            {
                 if self.prompt_input.vim_enabled && self.prompt_input.vim_mode != VimMode::Insert {
                     self.prompt_input.vim_command(&c.to_string());
                 } else {
@@ -5409,6 +5538,7 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> anyhow::Result<Option<String>> {
+        let mut ignore_enter_after_paste_until: Option<std::time::Instant> = None;
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
@@ -5523,6 +5653,14 @@ impl App {
             if event::poll(std::time::Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key) => {
+                        if key.code == KeyCode::Enter {
+                            if let Some(until) = ignore_enter_after_paste_until {
+                                if std::time::Instant::now() <= until {
+                                    ignore_enter_after_paste_until = None;
+                                    continue;
+                                }
+                            }
+                        }
                         // On Windows crossterm fires both Press and Release events.
                         // We normally skip non-press events, but when voice PTT mode
                         // is active we need the Release event for the `V` key so we
@@ -5571,8 +5709,10 @@ impl App {
                             && !self.history_search_overlay.visible
                             && self.history_search.is_none() =>
                     {
-                        self.prompt_input.paste(&data);
-                        self.refresh_prompt_input();
+                        self.paste_text_into_prompt(&data);
+                        ignore_enter_after_paste_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(250),
+                        );
                     }
                     Event::Mouse(mouse_event) => {
                         self.handle_mouse_event(mouse_event);
@@ -5667,6 +5807,15 @@ mod tests {
         let mut app = make_app();
         assert!(!app.intercept_slash_command_with_args("mcp", "auth mcphub"));
         assert!(!app.mcp_view.open);
+    }
+
+    #[test]
+    fn test_argument_commands_are_not_intercepted() {
+        let mut app = make_app();
+        assert!(!app.intercept_slash_command_with_args("theme", "dark"));
+        assert!(!app.intercept_slash_command_with_args("fast", "on"));
+        assert!(!app.intercept_slash_command_with_args("rtk", "status"));
+        assert!(!app.theme_screen.visible);
     }
 
     #[test]
@@ -5855,6 +6004,19 @@ mod tests {
         app.handle_key_event(press_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
 
         assert!(app.command_palette.visible);
+        assert_eq!(app.prompt_input.text, "hello");
+    }
+
+    #[test]
+    fn test_super_modified_char_does_not_insert_or_submit() {
+        let mut app = make_app();
+        app.prompt_input.text = "hello".to_string();
+        app.prompt_input.cursor = app.prompt_input.text.len();
+        app.refresh_prompt_input();
+
+        let submitted = app.handle_key_event(press_key(KeyCode::Char('x'), KeyModifiers::SUPER));
+
+        assert!(!submitted);
         assert_eq!(app.prompt_input.text, "hello");
     }
 

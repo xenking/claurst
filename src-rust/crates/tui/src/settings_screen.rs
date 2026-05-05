@@ -88,6 +88,41 @@ pub struct SettingsScreen {
     pub selected_field: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsControl {
+    Model,
+    MaxTokens,
+    OutputStyle,
+    AutoCompact,
+    Notifications,
+    ShowTurnDuration,
+    ReduceMotion,
+    TerminalProgressBar,
+    Telemetry,
+    UsageSharing,
+    VerboseLogging,
+}
+
+const GENERAL_CONTROLS: &[SettingsControl] = &[
+    SettingsControl::Model,
+    SettingsControl::MaxTokens,
+    SettingsControl::OutputStyle,
+    SettingsControl::AutoCompact,
+    SettingsControl::Notifications,
+    SettingsControl::ShowTurnDuration,
+];
+
+const DISPLAY_CONTROLS: &[SettingsControl] = &[
+    SettingsControl::ReduceMotion,
+    SettingsControl::TerminalProgressBar,
+];
+
+const PRIVACY_CONTROLS: &[SettingsControl] = &[
+    SettingsControl::Telemetry,
+    SettingsControl::UsageSharing,
+    SettingsControl::VerboseLogging,
+];
+
 impl SettingsScreen {
     pub fn new() -> Self {
         let settings_snapshot = Settings::load_sync().unwrap_or_default();
@@ -191,27 +226,42 @@ impl SettingsScreen {
     }
 
     pub fn scroll_up(&mut self) {
+        if self.max_fields_for_tab() == 0 {
+            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+            return;
+        }
         if self.selected_field > 0 {
             self.selected_field -= 1;
+            self.scroll_offset = self.scroll_offset.saturating_sub(1);
         }
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
     }
 
     pub fn scroll_down(&mut self) {
         let max_fields = self.max_fields_for_tab();
-        if self.selected_field + 1 < max_fields {
+        if max_fields == 0 {
+            self.scroll_offset = self.scroll_offset.saturating_add(1);
+        } else if self.selected_field + 1 < max_fields {
             self.selected_field += 1;
+            self.scroll_offset = self.scroll_offset.saturating_add(1);
         }
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
     }
 
-    /// Returns the number of interactive (togglable) fields in the current tab.
+    /// Returns the number of selectable fields in the current tab.
     fn max_fields_for_tab(&self) -> usize {
+        self.controls_for_tab().len()
+    }
+
+    fn controls_for_tab(&self) -> &'static [SettingsControl] {
         match &self.active_tab {
-            SettingsTab::General => 3, // auto-compact, notifications, show-turn-duration
-            SettingsTab::Display => 2, // reduce-motion, terminal-progress-bar
-            _ => 0,
+            SettingsTab::General => GENERAL_CONTROLS,
+            SettingsTab::Display => DISPLAY_CONTROLS,
+            SettingsTab::Privacy => PRIVACY_CONTROLS,
+            SettingsTab::Advanced | SettingsTab::KeyBindings => &[],
         }
+    }
+
+    fn selected_control(&self) -> Option<SettingsControl> {
+        self.controls_for_tab().get(self.selected_field).copied()
     }
 
     /// Start editing a field by name, seeding the buffer with current value.
@@ -325,35 +375,42 @@ fn save_setting_bool(key: &str, value: bool) {
 /// change. The mapping is: General tab fields 0,1,2 → auto_compact_enabled,
 /// notifications_enabled, show_turn_duration; Display tab fields 0,1 →
 /// reduce_motion, terminal_progress_bar.
-pub fn toggle_current_field(screen: &mut SettingsScreen, _config: &mut Config) {
-    match &screen.active_tab {
-        SettingsTab::General => match screen.selected_field {
-            0 => {
-                screen.auto_compact_enabled = !screen.auto_compact_enabled;
-                save_setting_bool("autoCompact", screen.auto_compact_enabled);
-            }
-            1 => {
-                screen.notifications_enabled = !screen.notifications_enabled;
-                save_setting_bool("notifications", screen.notifications_enabled);
-            }
-            2 => {
-                screen.show_turn_duration = !screen.show_turn_duration;
-                save_setting_bool("showTurnDuration", screen.show_turn_duration);
-            }
-            _ => {}
-        },
-        SettingsTab::Display => match screen.selected_field {
-            0 => {
-                screen.reduce_motion = !screen.reduce_motion;
-                save_setting_bool("reduceMotion", screen.reduce_motion);
-            }
-            1 => {
-                screen.terminal_progress_bar = !screen.terminal_progress_bar;
-                save_setting_bool("terminalProgressBar", screen.terminal_progress_bar);
-            }
-            _ => {}
-        },
-        _ => {}
+pub fn toggle_current_field(screen: &mut SettingsScreen, config: &mut Config) {
+    match screen.selected_control() {
+        Some(SettingsControl::AutoCompact) => {
+            screen.auto_compact_enabled = !screen.auto_compact_enabled;
+            save_setting_bool("autoCompact", screen.auto_compact_enabled);
+        }
+        Some(SettingsControl::Notifications) => {
+            screen.notifications_enabled = !screen.notifications_enabled;
+            save_setting_bool("notifications", screen.notifications_enabled);
+        }
+        Some(SettingsControl::ShowTurnDuration) => {
+            screen.show_turn_duration = !screen.show_turn_duration;
+            save_setting_bool("showTurnDuration", screen.show_turn_duration);
+        }
+        Some(SettingsControl::ReduceMotion) => {
+            screen.reduce_motion = !screen.reduce_motion;
+            save_setting_bool("reduceMotion", screen.reduce_motion);
+        }
+        Some(SettingsControl::TerminalProgressBar) => {
+            screen.terminal_progress_bar = !screen.terminal_progress_bar;
+            save_setting_bool("terminalProgressBar", screen.terminal_progress_bar);
+        }
+        Some(SettingsControl::Telemetry) => {
+            let telemetry_enabled = PrivacySnapshot::load().telemetry_enabled();
+            save_setting_bool("disableTelemetry", telemetry_enabled);
+        }
+        Some(SettingsControl::UsageSharing) => {
+            let usage_sharing_enabled = PrivacySnapshot::load().usage_sharing_enabled();
+            save_setting_bool("shareUsageData", !usage_sharing_enabled);
+        }
+        Some(SettingsControl::VerboseLogging) => {
+            config.verbose = !config.verbose;
+            screen.settings_snapshot.config.verbose = config.verbose;
+            let _ = screen.settings_snapshot.save_sync();
+        }
+        Some(SettingsControl::Model | SettingsControl::MaxTokens | SettingsControl::OutputStyle) | None => {}
     }
 }
 
@@ -445,6 +502,15 @@ pub fn render_settings_screen(frame: &mut Frame, screen: &SettingsScreen, area: 
             Span::styled(" Esc ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw("cancel"),
         ])
+    } else if screen.max_fields_for_tab() == 0 {
+        Line::from(vec![
+            Span::styled(" Tab ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::raw("next tab  "),
+            Span::styled(" ↑↓/PgUp/PgDn ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::raw("scroll  "),
+            Span::styled(" Esc ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("close"),
+        ])
     } else {
         Line::from(vec![
             Span::styled(" Tab ", Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)),
@@ -504,6 +570,7 @@ fn build_general_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         &model_val,
         "AI model used for responses.",
         screen,
+        screen.selected_control() == Some(SettingsControl::Model),
     ));
     // Show available models hint
     lines.push(indent_line(
@@ -523,6 +590,7 @@ fn build_general_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         &max_tokens_val,
         "Maximum tokens per response.",
         screen,
+        screen.selected_control() == Some(SettingsControl::MaxTokens),
     ));
     lines.push(Line::from(""));
 
@@ -538,6 +606,7 @@ fn build_general_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         &output_style_val,
         "Controls the verbosity and format of responses.",
         screen,
+        screen.selected_control() == Some(SettingsControl::OutputStyle),
     ));
     lines.push(indent_line(
         &format!("  Available: {}", style_names.join(", ")),
@@ -567,7 +636,7 @@ fn build_general_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         screen.auto_compact_enabled,
         "Auto-compact",
         &format!("Automatically compact at {}%", screen.auto_compact_threshold),
-        screen.selected_field == 0,
+        screen.selected_control() == Some(SettingsControl::AutoCompact),
     ));
 
     // Field 1: Notifications
@@ -575,7 +644,7 @@ fn build_general_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         screen.notifications_enabled,
         "Desktop notifications",
         "Notify when turn completes",
-        screen.selected_field == 1,
+        screen.selected_control() == Some(SettingsControl::Notifications),
     ));
 
     // Field 2: Show turn duration
@@ -583,7 +652,7 @@ fn build_general_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         screen.show_turn_duration,
         "Show turn duration",
         "Display elapsed time per turn",
-        screen.selected_field == 2,
+        screen.selected_control() == Some(SettingsControl::ShowTurnDuration),
     ));
 
     lines
@@ -638,7 +707,7 @@ fn build_display_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         screen.reduce_motion,
         "Reduce motion",
         "Disable UI animations",
-        screen.selected_field == 0,
+        screen.selected_control() == Some(SettingsControl::ReduceMotion),
     ));
 
     // Field 1: Terminal progress bar
@@ -646,7 +715,7 @@ fn build_display_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         screen.terminal_progress_bar,
         "Terminal progress bar",
         "Show progress during tool use",
-        screen.selected_field == 1,
+        screen.selected_control() == Some(SettingsControl::TerminalProgressBar),
     ));
 
     // Output styles section
@@ -747,6 +816,7 @@ fn build_privacy_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         "Telemetry",
         privacy.telemetry_enabled(),
         "Sends anonymised usage statistics to help improve Claurst.",
+        screen.selected_control() == Some(SettingsControl::Telemetry),
     );
 
     // Usage sharing
@@ -755,6 +825,7 @@ fn build_privacy_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         "Usage Sharing",
         privacy.usage_sharing_enabled(),
         "Shares aggregate usage data for product improvement.",
+        screen.selected_control() == Some(SettingsControl::UsageSharing),
     );
 
     // Verbose (local debug logging)
@@ -763,6 +834,7 @@ fn build_privacy_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         "Verbose Logging",
         screen.settings_snapshot.config.verbose,
         "Logs additional debug information locally (--verbose flag).",
+        screen.selected_control() == Some(SettingsControl::VerboseLogging),
     );
 
     lines.push(Line::from(""));
@@ -779,25 +851,30 @@ fn build_privacy_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
     lines
 }
 
-fn privacy_toggle_lines(lines: &mut Vec<Line<'static>>, name: &str, enabled: bool, desc: &str) {
+fn privacy_toggle_lines(lines: &mut Vec<Line<'static>>, name: &str, enabled: bool, desc: &str, selected: bool) {
     let (toggle_text, toggle_color) = if enabled {
         (" ON  ", Color::Green)
     } else {
         (" OFF ", Color::Red)
     };
+    let label_style = if selected {
+        Style::default().fg(Color::Black).bg(CLAURST_ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
+    let desc_style = if selected {
+        Style::default().fg(Color::Black).bg(CLAURST_ACCENT)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("  {:<25}", name),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(format!("  {:<25}", name), label_style),
         Span::styled(
             format!("[{}]", toggle_text),
-            Style::default()
-                .fg(toggle_color)
-                .add_modifier(Modifier::BOLD),
+            if selected { label_style } else { Style::default().fg(toggle_color).add_modifier(Modifier::BOLD) },
         ),
     ]));
-    lines.push(indent_line(&format!("  {}", desc), Color::DarkGray));
+    lines.push(Line::from(vec![Span::styled(format!("  {}", desc), desc_style)]));
     lines.push(Line::from(""));
 }
 
@@ -1147,6 +1224,7 @@ fn field_lines(
     current_value: &str,
     description: &str,
     screen: &SettingsScreen,
+    selected: bool,
 ) -> Vec<Line<'static>> {
     let is_editing = screen.edit_field.as_deref() == Some(field_key);
     let has_pending = screen.pending_changes.contains_key(field_key);
@@ -1159,12 +1237,31 @@ fn field_lines(
         current_value.to_string()
     };
 
-    let value_color = if is_editing {
+    let value_color = if selected {
+        Color::Black
+    } else if is_editing {
         Color::Yellow
     } else if has_pending {
         Color::Magenta
     } else {
         CLAURST_ACCENT
+    };
+
+    let row_bg = if selected { CLAURST_ACCENT } else { Color::Reset };
+    let label_style = if selected {
+        Style::default().fg(Color::Black).bg(row_bg).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(CLAURST_TEXT).add_modifier(Modifier::BOLD)
+    };
+    let hint_style = if selected {
+        Style::default().fg(Color::Black).bg(row_bg)
+    } else {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)
+    };
+    let description_style = if selected {
+        Style::default().fg(Color::Black).bg(row_bg)
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
 
     let edit_hint = if is_editing {
@@ -1175,23 +1272,34 @@ fn field_lines(
 
     vec![
         Line::from(vec![
-            Span::styled(
-                format!("  {:<25}", label),
-                Style::default().fg(CLAURST_TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(display_value, Style::default().fg(value_color)),
-            Span::styled(
-                edit_hint.to_string(),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ),
+            Span::styled(format!("  {:<25}", label), label_style),
+            Span::styled(display_value, Style::default().fg(value_color).bg(row_bg)),
+            Span::styled(edit_hint.to_string(), hint_style),
         ]),
-        Line::from(vec![Span::styled(
-            format!("    {}", description),
-            Style::default().fg(Color::DarkGray),
-        )]),
+        Line::from(vec![Span::styled(format!("    {}", description), description_style)]),
     ]
+}
+
+fn start_editing_selected_field(screen: &mut SettingsScreen) {
+    let cfg = &screen.settings_snapshot.config;
+    match screen.selected_control() {
+        Some(SettingsControl::Model) => {
+            let model_val = cfg.model.clone().unwrap_or_else(|| claurst_core::constants::DEFAULT_MODEL.to_string());
+            screen.start_edit("model", &model_val);
+        }
+        Some(SettingsControl::MaxTokens) => {
+            let max_tokens_val = cfg
+                .max_tokens
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| claurst_core::constants::DEFAULT_MAX_TOKENS.to_string());
+            screen.start_edit("max_tokens", &max_tokens_val);
+        }
+        Some(SettingsControl::OutputStyle) => {
+            let output_style_val = cfg.output_style.clone().unwrap_or_else(|| "default".to_string());
+            screen.start_edit("output_style", &output_style_val);
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1263,28 +1371,12 @@ pub fn handle_settings_key(
             toggle_current_field(screen, config);
         }
         KeyCode::Enter => {
-            // For tabs with interactive boolean fields, Enter toggles.
-            // For General tab with no field selected (selected_field beyond
-            // boolean range), fall through to text editing.
-            let has_toggle = matches!(
-                &screen.active_tab,
-                SettingsTab::General | SettingsTab::Display
-            ) && screen.selected_field < screen.max_fields_for_tab();
-
-            if has_toggle {
-                toggle_current_field(screen, config);
-            } else {
-                // Start editing the first editable text field
-                match &screen.active_tab {
-                    SettingsTab::General => {
-                        let cfg = &screen.settings_snapshot.config;
-                        let model_val = cfg.model.clone().unwrap_or_else(|| {
-                            claurst_core::constants::DEFAULT_MODEL.to_string()
-                        });
-                        screen.start_edit("model", &model_val);
-                    }
-                    _ => {}
+            match screen.selected_control() {
+                Some(SettingsControl::Model | SettingsControl::MaxTokens | SettingsControl::OutputStyle) => {
+                    start_editing_selected_field(screen);
                 }
+                Some(_) => toggle_current_field(screen, config),
+                None => {}
             }
         }
         _ => {}
@@ -1382,7 +1474,7 @@ mod tests {
         let mut screen = SettingsScreen::new();
         let mut config = Config::default();
         screen.active_tab = SettingsTab::General;
-        screen.selected_field = 0;
+        screen.selected_field = 3;
 
         let before = screen.auto_compact_enabled;
         toggle_current_field(&mut screen, &mut config);
@@ -1401,7 +1493,7 @@ mod tests {
         let mut screen = SettingsScreen::new();
         let mut config = Config::default();
         screen.active_tab = SettingsTab::General;
-        screen.selected_field = 1;
+        screen.selected_field = 4;
 
         let before = screen.notifications_enabled;
         toggle_current_field(&mut screen, &mut config);
@@ -1502,13 +1594,13 @@ mod tests {
         let mut screen = SettingsScreen::new();
 
         screen.active_tab = SettingsTab::General;
-        assert_eq!(screen.max_fields_for_tab(), 3);
+        assert_eq!(screen.max_fields_for_tab(), 6);
 
         screen.active_tab = SettingsTab::Display;
         assert_eq!(screen.max_fields_for_tab(), 2);
 
         screen.active_tab = SettingsTab::Privacy;
-        assert_eq!(screen.max_fields_for_tab(), 0);
+        assert_eq!(screen.max_fields_for_tab(), 3);
 
         screen.active_tab = SettingsTab::Advanced;
         assert_eq!(screen.max_fields_for_tab(), 0);
@@ -1516,4 +1608,79 @@ mod tests {
         screen.active_tab = SettingsTab::KeyBindings;
         assert_eq!(screen.max_fields_for_tab(), 0);
     }
+
+    #[test]
+    fn general_tab_arrow_navigation_reaches_editable_fields_and_toggles() {
+        let mut screen = SettingsScreen::new();
+        screen.active_tab = SettingsTab::General;
+
+        assert_eq!(screen.selected_control(), Some(SettingsControl::Model));
+        screen.scroll_down();
+        assert_eq!(screen.selected_control(), Some(SettingsControl::MaxTokens));
+        screen.scroll_down();
+        assert_eq!(screen.selected_control(), Some(SettingsControl::OutputStyle));
+        screen.scroll_down();
+        assert_eq!(screen.selected_control(), Some(SettingsControl::AutoCompact));
+        screen.scroll_down();
+        assert_eq!(screen.selected_control(), Some(SettingsControl::Notifications));
+        screen.scroll_down();
+        assert_eq!(screen.selected_control(), Some(SettingsControl::ShowTurnDuration));
+        screen.scroll_down();
+        assert_eq!(screen.selected_field, 5, "selection should clamp at last item");
+    }
+
+    #[test]
+    fn enter_on_general_editable_fields_starts_expected_edit() {
+        let mut screen = SettingsScreen::new();
+        let mut config = Config::default();
+        screen.visible = true;
+        screen.active_tab = SettingsTab::General;
+
+        handle_settings_key(
+            &mut screen,
+            &mut config,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+        assert_eq!(screen.edit_field.as_deref(), Some("model"));
+
+        screen.cancel_edit();
+        screen.selected_field = 1;
+        handle_settings_key(
+            &mut screen,
+            &mut config,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+        assert_eq!(screen.edit_field.as_deref(), Some("max_tokens"));
+
+        screen.cancel_edit();
+        screen.selected_field = 2;
+        handle_settings_key(
+            &mut screen,
+            &mut config,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+        assert_eq!(screen.edit_field.as_deref(), Some("output_style"));
+    }
+
+    #[test]
+    fn tab_resets_selection_for_new_tab() {
+        let mut screen = SettingsScreen::new();
+        screen.active_tab = SettingsTab::General;
+        screen.selected_field = 5;
+        screen.next_tab();
+
+        assert_eq!(screen.active_tab, SettingsTab::Display);
+        assert_eq!(screen.selected_field, 0);
+        assert_eq!(screen.selected_control(), Some(SettingsControl::ReduceMotion));
+    }
+
 }

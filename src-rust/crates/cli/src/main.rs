@@ -146,6 +146,15 @@ fn materialize_image_blob(path: &std::path::Path, session_id: &str) -> PathBuf {
     }
 }
 
+fn load_fast_mode_setting() -> bool {
+    let path = Settings::config_dir().join("ui-settings.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|value| value.get("fast_mode").and_then(|fast| fast.as_bool()))
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // MCP tool wrapper: makes MCP server tools look like native cc-tools.
 // ---------------------------------------------------------------------------
@@ -787,6 +796,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build query config
     let mut query_config = claurst_query::QueryConfig::from_config_with_registry(&config, &model_registry);
+    query_config.fast_mode = load_fast_mode_setting();
     query_config.model_registry = Some(model_registry.clone());
     query_config.max_turns = cli.max_turns;
     query_config.system_prompt = Some(system_prompt);
@@ -1419,7 +1429,7 @@ async fn run_interactive(
         device_auth_dialog::DeviceAuthEvent,
     };
     use crossterm::event::{self, Event, KeyCode};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -1474,6 +1484,7 @@ async fn run_interactive(
     // Set up terminal
     let mut terminal = setup_terminal()?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
+    app.fast_mode = base_query_config.fast_mode;
     // Sync initial effort level (from --effort flag or /effort command) to TUI indicator.
     if let Some(level) = base_query_config.effort_level {
         use claurst_tui::EffortLevel as TuiEL;
@@ -1717,6 +1728,7 @@ async fn run_interactive(
         })
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
+    let mut ignore_enter_after_paste_until: Option<Instant> = None;
     'main: loop {
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_rustle_pose();
@@ -1734,6 +1746,15 @@ async fn run_interactive(
                     // Only process Press to avoid double-registering input.
                     if key.kind != crossterm::event::KeyEventKind::Press {
                         continue;
+                    }
+
+                    if key.code == KeyCode::Enter {
+                        if let Some(until) = ignore_enter_after_paste_until {
+                            if Instant::now() <= until {
+                                ignore_enter_after_paste_until = None;
+                                continue;
+                            }
+                        }
                     }
 
                     // Ctrl+C: copy selected text if there's a selection, otherwise cancel/quit
@@ -1834,13 +1855,13 @@ async fn run_interactive(
                             //   /model claude-haiku  → set model, don't open picker
                             //   /theme dark          → set theme, don't open picker
                             //   /resume <id>         → load session, don't open browser
-                            // Also skip TUI for /vim, /voice, /fast with explicit
+                            // Also skip TUI for /vim, /voice, /fast, /rtk with explicit
                             // on|off args so the blind-toggle doesn't misfire.
                             let skip_tui_for_args = !cmd_args.is_empty()
                                 && matches!(
                                     cmd_name.as_str(),
                                     "model" | "theme" | "resume" | "session"
-                                        | "vim" | "vi" | "voice" | "fast" | "speed"
+                                        | "vim" | "vi" | "voice" | "fast" | "speed" | "effort" | "rtk"
                                 );
                             let handled_by_tui = if skip_tui_for_args {
                                 false
@@ -2040,7 +2061,7 @@ async fn run_interactive(
                                     // Suppress text output when TUI already opened an
                                     // overlay for this command (e.g. /stats opens dialog
                                     // AND would push a text message — drop the text).
-                                    if !handled_by_tui {
+                                    if !handled_by_tui && !(cmd_name == "effort" && !cmd_args.is_empty()) {
                                         app.push_message(
                                             claurst_core::types::Message::assistant(msg),
                                         );
@@ -2057,10 +2078,11 @@ async fn run_interactive(
                                         app.set_model(model.clone());
                                     }
                                     // Sync fast_mode visual indicator.
-                                    app.fast_mode = applied_cfg.model
-                                        .as_deref()
-                                        .map(|m| m.contains("haiku"))
-                                        .unwrap_or(false);
+                                    if matches!(cmd_name.as_str(), "fast" | "speed") {
+                                        app.fast_mode = load_fast_mode_setting();
+                                    } else {
+                                        app.fast_mode = load_fast_mode_setting();
+                                    }
                                     // Sync plan_mode visual indicator.
                                     app.plan_mode = matches!(
                                         applied_cfg.permission_mode,
@@ -2081,10 +2103,11 @@ async fn run_interactive(
                                     // Sync model/provider + fast_mode visual indicator.
                                     if let Some(ref model) = applied_cfg.model {
                                         app.set_model(model.clone());
-                                        app.fast_mode = model.contains("haiku");
+                                    }
+                                    if matches!(cmd_name.as_str(), "fast" | "speed") {
+                                        app.fast_mode = load_fast_mode_setting();
                                     } else {
-                                        // model reset to None means fast mode off.
-                                        app.fast_mode = false;
+                                        app.fast_mode = load_fast_mode_setting();
                                     }
                                     app.config = applied_cfg.clone();
                                     session.model = claurst_api::effective_model_for_config(
@@ -2133,8 +2156,12 @@ async fn run_interactive(
                                 && cmd_name == "effort"
                                 && !cmd_args.is_empty()
                             {
-                                if let Some(level) =
-                                    claurst_core::effort::EffortLevel::from_str(&cmd_args)
+                                let effort_arg = if cmd_args.trim().eq_ignore_ascii_case("normal") {
+                                    "medium"
+                                } else {
+                                    cmd_args.trim()
+                                };
+                                if let Some(level) = claurst_core::effort::EffortLevel::from_str(effort_arg)
                                 {
                                     current_effort = Some(level);
                                     app.effort_level = match level {
@@ -2268,6 +2295,7 @@ async fn run_interactive(
                         qcfg.output_style = cmd_ctx.config.effective_output_style();
                         qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
                         qcfg.working_directory = Some(tool_ctx.working_dir.display().to_string());
+                        qcfg.fast_mode = app.fast_mode;
                         // Apply active effort level (set via /effort command).
                         if let Some(level) = current_effort {
                             qcfg.effort_level = Some(level);
@@ -2414,6 +2442,17 @@ async fn run_interactive(
                         messages = app.messages.clone();
                         session.messages = messages.clone();
                         session.updated_at = chrono::Utc::now();
+                    }
+                }
+                Event::Paste(data) => {
+                    if !app.is_streaming
+                        && app.permission_request.is_none()
+                        && !app.history_search_overlay.visible
+                        && app.history_search.is_none()
+                    {
+                        app.paste_text_into_prompt(&data);
+                        ignore_enter_after_paste_until =
+                            Some(Instant::now() + Duration::from_millis(250));
                     }
                 }
                 Event::Mouse(mouse) => {

@@ -309,6 +309,9 @@ impl CodexProvider {
                 "textVerbosity" => {
                     body["text"]["verbosity"] = value.clone();
                 }
+                "serviceTier" => {
+                    body["service_tier"] = value.clone();
+                }
                 "include" => {
                     body["include"] = value.clone();
                 }

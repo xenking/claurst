@@ -176,6 +176,36 @@ pub mod types {
         }
     }
 
+    fn api_content_block_to_value(block: &ContentBlock) -> Value {
+        match block {
+            ContentBlock::Image { source } => {
+                if let Some(url) = source.url.as_deref() {
+                    return serde_json::json!({
+                        "type": "image",
+                        "source": { "type": "url", "url": url },
+                    });
+                }
+
+                if let Some(data) = source.base64_data() {
+                    return serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": source.media_type.as_deref().unwrap_or("image/png"),
+                            "data": data,
+                        },
+                    });
+                }
+
+                serde_json::json!({
+                    "type": "text",
+                    "text": "[Image omitted: unable to read image data]",
+                })
+            }
+            _ => serde_json::to_value(block).unwrap_or(Value::Null),
+        }
+    }
+
     /// Simplified message type for the API wire format.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ApiMessage {
@@ -191,9 +221,9 @@ pub mod types {
             };
             let content = match &msg.content {
                 MessageContent::Text(t) => Value::String(t.clone()),
-                MessageContent::Blocks(blocks) => {
-                    serde_json::to_value(blocks).unwrap_or(Value::Null)
-                }
+                MessageContent::Blocks(blocks) => Value::Array(
+                    blocks.iter().map(api_content_block_to_value).collect(),
+                ),
             };
             Self {
                 role: role.to_string(),
@@ -1283,5 +1313,51 @@ mod tests {
         let (msg, _usage, stop) = acc.finish();
         assert_eq!(msg.get_text(), Some("Hello world!"));
         assert_eq!(stop.as_deref(), Some("end_turn"));
+    }
+
+    #[test]
+    fn api_message_file_backed_image_serializes_base64_without_path() {
+        let path = std::env::temp_dir().join(format!(
+            "claurst-api-image-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"fake png bytes").expect("write image");
+
+        let msg = Message::user_blocks(vec![ContentBlock::Image {
+            source: claurst_core::types::ImageSource {
+                source_type: "file".to_string(),
+                media_type: Some("image/png".to_string()),
+                data: None,
+                url: None,
+                path: Some(path.to_string_lossy().to_string()),
+            },
+        }]);
+
+        let api = ApiMessage::from(&msg);
+        let text = serde_json::to_string(&api.content).expect("json");
+        assert!(text.contains("\"base64\""), "{text}");
+        assert!(text.contains("ZmFrZSBwbmcgYnl0ZXM="), "{text}");
+        assert!(!text.contains(path.to_string_lossy().as_ref()), "{text}");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn api_message_missing_file_image_does_not_leak_path() {
+        let path = std::env::temp_dir().join("claurst-api-missing-image.png");
+        let msg = Message::user_blocks(vec![ContentBlock::Image {
+            source: claurst_core::types::ImageSource {
+                source_type: "file".to_string(),
+                media_type: Some("image/png".to_string()),
+                data: None,
+                url: None,
+                path: Some(path.to_string_lossy().to_string()),
+            },
+        }]);
+
+        let api = ApiMessage::from(&msg);
+        let text = serde_json::to_string(&api.content).expect("json");
+        assert!(text.contains("Image omitted"), "{text}");
+        assert!(!text.contains(path.to_string_lossy().as_ref()), "{text}");
     }
 }

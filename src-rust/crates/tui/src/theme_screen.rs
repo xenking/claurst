@@ -1,7 +1,7 @@
 // theme_screen.rs — Theme picker overlay opened by /theme.
 //
 // Shows a list of available themes with colour swatches. Arrow keys navigate,
-// Enter selects, Esc cancels.
+// Enter/Space selects, Esc cancels.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -246,7 +246,7 @@ pub fn render_theme_screen(frame: &mut Frame, screen: &ThemeScreen, area: Rect) 
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            " ↑↓ navigate  ·  enter apply  ·  esc cancel",
+            " ↑↓ navigate  ·  enter/space apply  ·  esc cancel",
             Style::default().fg(CLAURST_MUTED).add_modifier(Modifier::ITALIC),
         )])),
         layout.footer_area,
@@ -274,7 +274,7 @@ pub fn handle_theme_key(
             screen.close();
             None
         }
-        KeyCode::Enter => {
+        KeyCode::Enter | KeyCode::Char(' ') => {
             let name = screen.selected_name().map(String::from);
             screen.close();
             name
@@ -328,5 +328,25 @@ mod tests {
 
         screen.select_next();
         assert_eq!(screen.selected_name(), Some("default"));
+    }
+
+    #[test]
+    fn theme_space_applies_selected_theme() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+        let mut screen = ThemeScreen::new();
+        screen.open("dark");
+        let selected = handle_theme_key(
+            &mut screen,
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            },
+        );
+
+        assert_eq!(selected.as_deref(), Some("dark"));
+        assert!(!screen.visible);
     }
 }
