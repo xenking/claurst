@@ -884,6 +884,48 @@ pub mod config {
         }
     }
 
+    // ---- RTK -------------------------------------------------------------
+
+    fn default_rtk_binary() -> String {
+        "rtk".to_string()
+    }
+
+    fn default_rtk_rewrite_timeout_ms() -> u64 {
+        2_000
+    }
+
+    /// Native RTK (Rust Token Killer) integration settings.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(default, rename_all = "camelCase")]
+    pub struct RtkConfig {
+        pub enabled: bool,
+        pub mode: RtkMode,
+        pub binary: String,
+        pub exclude_commands: Vec<String>,
+        pub rewrite_timeout_ms: u64,
+    }
+
+    impl Default for RtkConfig {
+        fn default() -> Self {
+            Self {
+                enabled: true,
+                mode: RtkMode::Rewrite,
+                binary: default_rtk_binary(),
+                exclude_commands: Vec::new(),
+                rewrite_timeout_ms: default_rtk_rewrite_timeout_ms(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum RtkMode {
+        Off,
+        Suggest,
+        #[default]
+        Rewrite,
+    }
+
     // ---- Config ----------------------------------------------------------
 
     /// Top-level configuration values, merged from CLI args + settings file + env.
@@ -938,6 +980,8 @@ pub mod config {
         /// Skill-discovery configuration (copied from Settings on load).
         #[serde(default)]
         pub skills: SkillsConfig,
+        #[serde(default)]
+        pub rtk: RtkConfig,
         /// Managed agent (manager-executor) configuration.
         #[serde(default)]
         pub managed_agents: Option<ManagedAgentConfig>,
@@ -1555,6 +1599,11 @@ pub mod config {
                     for u in over.config.skills.urls { if !urls.contains(&u) { urls.push(u); } }
                     SkillsConfig { paths, urls }
                 },
+                rtk: if over.config.rtk != RtkConfig::default() {
+                    over.config.rtk
+                } else {
+                    base.config.rtk
+                },
                 managed_agents: over.config.managed_agents.or(base.config.managed_agents),
             };
             Self {
@@ -1698,6 +1747,7 @@ pub mod constants {
     pub const TOOL_NAME_FFFQ: &str = "Fffq";
     pub const TOOL_NAME_GRAPHIFYQ: &str = "Graphifyq";
     pub const TOOL_NAME_OMX_MEMORY: &str = "OmxMemory";
+    pub const TOOL_NAME_RTK: &str = "Rtk";
     pub const TOOL_NAME_AGENT: &str = "Agent";
     pub const TOOL_NAME_WEB_FETCH: &str = "WebFetch";
     pub const TOOL_NAME_WEB_SEARCH: &str = "WebSearch";

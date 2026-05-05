@@ -110,8 +110,44 @@ See [Permission Modes](#permission-modes) for a full description of each value.
 | `disallowed_tools` | array of strings | [] | Always deny these tools, regardless of other settings. |
 
 Tool names match the internal names: `Bash`, `Read`, `Write`, `Edit`, `Glob`,
-`Grep`, `WebSearch`, `WebFetch`, `TodoWrite`, `TodoRead`, and MCP tool names
-prefixed with their server name (`myserver_toolname`).
+`Grep`, `Fffq`, `Graphifyq`, `OmxMemory`, `Rtk`, `WebSearch`, `WebFetch`,
+`TodoWrite`, `TodoRead`, and MCP tool names prefixed with their server name
+(`myserver_toolname`).
+
+### RTK command-output compression
+
+Claurst can optionally use [RTK](https://github.com/rtk-ai/rtk) as a native
+Bash/PtyBash rewrite adapter. When enabled and the `rtk` binary is available,
+Claurst asks `rtk rewrite <command>` for a compact equivalent before executing
+noisy shell commands such as `git`, `gh`, `cargo`, test runners, builds,
+Docker, and package-manager commands.
+
+```json
+{
+  "config": {
+    "rtk": {
+      "enabled": true,
+      "mode": "rewrite",
+      "binary": "rtk",
+      "excludeCommands": ["curl"],
+      "rewriteTimeoutMs": 2000
+    }
+  }
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | boolean | true | Attempt native RTK rewrites for Bash/PtyBash commands. Missing RTK binaries fall back to raw commands. |
+| `mode` | string | `"rewrite"` | One of `"off"`, `"suggest"`, `"rewrite"`. Suggest mode logs possible rewrites but executes the original command. |
+| `binary` | string | `"rtk"` | RTK executable path or binary name. |
+| `excludeCommands` | array of strings | [] | Command prefixes to keep raw even when RTK is enabled. |
+| `rewriteTimeoutMs` | integer | 2000 | Timeout for the `rtk rewrite` subprocess. |
+
+Set `CLAURST_RTK=0` (or `false`, `off`, `no`) to disable RTK rewrites for a
+session. RTK is not a replacement for native code-intelligence tools: use
+`Fffq` for repository lookup, `Graphifyq` for architecture/data-flow questions,
+and `OmxMemory` for durable prior context.
 
 ### Directory access
 

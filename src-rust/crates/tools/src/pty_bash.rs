@@ -10,6 +10,9 @@
 //  Windows → falls back to the existing cmd.exe approach; ConPTY is available
 //             in portable_pty but adds complexity for minimal gain on Windows.
 
+use crate::rtk::{
+    attach_rtk_metadata, classify_effective_bash_command, maybe_rewrite_for_tool,
+};
 use crate::{PermissionLevel, Tool, ToolContext, ToolResult, session_shell_state};
 use async_trait::async_trait;
 use claurst_core::bash_classifier::{BashRiskLevel, classify_bash_command};
@@ -555,6 +558,16 @@ impl Tool for PtyBashTool {
             ));
         }
 
+        let rtk_decision = maybe_rewrite_for_tool(&params.command, ctx, self.name()).await;
+        let command = rtk_decision.effective_command.clone();
+        if classify_effective_bash_command(&command) == BashRiskLevel::Critical {
+            return ToolResult::error(format!(
+                "Command blocked after RTK rewrite: classified as Critical risk by the bash security classifier.\n\
+                 Original: {}\nRewritten: {}",
+                params.command, command
+            ));
+        }
+
         let timeout_ms = params.timeout.min(600_000);
         let timeout_dur = Duration::from_millis(timeout_ms);
         let shell_state_arc = session_shell_state(&ctx.session_id);
@@ -565,10 +578,11 @@ impl Tool for PtyBashTool {
                 let state = shell_state_arc.lock();
                 state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
             };
-            return run_in_background(params.command, cwd, timeout_ms).await;
+            let result = run_in_background(command, cwd, timeout_ms).await;
+            return attach_rtk_metadata(result, &rtk_decision);
         }
 
-        debug!(command = %params.command, "Executing bash command via PTY");
+        debug!(command = %command, original_command = %params.command, "Executing bash command via PTY");
 
         // ── Windows path (no PTY — use cmd.exe fallback) ─────────────────────
         #[cfg(windows)]
@@ -577,8 +591,9 @@ impl Tool for PtyBashTool {
                 let state = shell_state_arc.lock();
                 state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
             };
-            return run_windows_fallback(&params.command, &effective_cwd, timeout_dur, timeout_ms)
-                .await;
+            let result =
+                run_windows_fallback(&command, &effective_cwd, timeout_dur, timeout_ms).await;
+            return attach_rtk_metadata(result, &rtk_decision);
         }
 
         // ── Unix PTY path ────────────────────────────────────────────────────
@@ -587,7 +602,7 @@ impl Tool for PtyBashTool {
             // Build the wrapper script that restores + captures shell state.
             let (script, working_dir_str) = {
                 let state = shell_state_arc.lock();
-                let script = build_wrapper_script(&params.command, &state, &ctx.working_dir);
+                let script = build_wrapper_script(&command, &state, &ctx.working_dir);
                 let wd = ctx.working_dir.to_string_lossy().into_owned();
                 (script, wd)
             };
@@ -629,7 +644,7 @@ impl Tool for PtyBashTool {
 
                     // Fast-path export capture
                     {
-                        let exports = extract_exports_from_command(&params.command);
+                        let exports = extract_exports_from_command(&command);
                         if !exports.is_empty() {
                             let mut state = shell_state_arc.lock();
                             for (k, v) in exports {
@@ -643,10 +658,16 @@ impl Tool for PtyBashTool {
                         output = "(no output)".to_string();
                     }
 
-                    truncate_output(output, exit_code)
+                    attach_rtk_metadata(truncate_output(output, exit_code), &rtk_decision)
                 }
-                Ok(Err(e)) => ToolResult::error(format!("PTY execution failed: {}", e)),
-                Err(_) => ToolResult::error(format!("Command timed out after {}ms", timeout_ms)),
+                Ok(Err(e)) => attach_rtk_metadata(
+                    ToolResult::error(format!("PTY execution failed: {}", e)),
+                    &rtk_decision,
+                ),
+                Err(_) => attach_rtk_metadata(
+                    ToolResult::error(format!("Command timed out after {}ms", timeout_ms)),
+                    &rtk_decision,
+                ),
             }
         }
     }

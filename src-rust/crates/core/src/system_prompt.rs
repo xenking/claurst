@@ -492,6 +492,9 @@ const TOOL_USE_GUIDELINES: &str = r#"
   materially change the answer, and to write durable notes when explicitly
   asked or when preserving a confirmed decision/preference/procedure is useful
 - For searches, prefer Fffq/Grep over `grep`; prefer Fffq/Glob over `find`
+- Native RTK may compact noisy Bash output for commands like git, gh, cargo,
+  tests, builds, Docker, and package managers. Do not use RTK as a replacement
+  for Fffq/Graphifyq/OmxMemory.
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits
 - Bash commands timeout after 2 minutes; use background mode for long operations
