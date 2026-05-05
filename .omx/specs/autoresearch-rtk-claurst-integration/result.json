@@ -1,0 +1,17 @@
+{
+  "status": "completed",
+  "validation_mode": "prompt-architect-artifact",
+  "validator_prompt": "Review the RTK-Claurst integration research against the mission: it must be evidence-backed, compare RTK agent integrations with Claurst internals, preserve FFF/Graphify/OmxMemory priorities, and give a staged implementation plan with risks.",
+  "architect_review": {
+    "verdict": "approved",
+    "reviewed_at": "2026-05-05T00:00:00+10:00",
+    "summary": "The report answers feasibility and value, identifies that RTK Codex support is prompt-only while Claude/OpenCode have programmatic rewrite hooks, finds Claurst's Bash/PtyBash execution path and the current Modified hook gap, and recommends a safe external-binary adapter before any vendoring. It includes risks and battle-test requirements."
+  },
+  "output_artifact_path": ".omx/specs/autoresearch-rtk-claurst-integration/report.md",
+  "source_snapshots": {
+    "rtk_clone": "/tmp/rtk-research",
+    "rtk_commit": "4338f02",
+    "claurst_repo": "/Users/xenking/Projects/github.com/xenking/claurst",
+    "claurst_branch": "xenking/codex-lab"
+  }
+}

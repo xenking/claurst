@@ -1,0 +1,7 @@
+{
+  "validation_mode": "prompt-architect-artifact",
+  "completion_artifact_path": ".omx/specs/autoresearch-rtk-claurst-integration/result.json",
+  "validator_prompt": "Review the research output against the mission for native RTK integration in Claurst.",
+  "output_artifact_path": ".omx/specs/autoresearch-rtk-claurst-integration/report.md",
+  "status": "completed"
+}
