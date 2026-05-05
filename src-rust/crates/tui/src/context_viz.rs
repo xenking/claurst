@@ -52,6 +52,7 @@ pub fn render_context_viz(
     rate_5h: Option<f32>,
     rate_7d: Option<f32>,
     cost_usd: f64,
+    show_cost: bool,
 ) {
     if !state.visible {
         return;
@@ -62,7 +63,11 @@ pub fn render_context_viz(
     if let Some(subtitle_area) = modal_header_line_area(layout.header_area, 1) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                " Token window, rate limits, and session cost.",
+                if show_cost {
+                    " Token window, rate limits, and session cost."
+                } else {
+                    " Token window and OAuth usage limits."
+                },
                 Style::default().fg(CLAURST_MUTED),
             )])),
             subtitle_area,
@@ -153,14 +158,29 @@ pub fn render_context_viz(
 
     lines.push(Line::from(""));
 
-    // -- Cost --------------------------------------------------------------------
-    lines.push(Line::from(vec![
-        Span::styled(" Session cost:  ", Style::default().fg(Color::White)),
-        Span::styled(
-            format!("${:.4}", cost_usd),
-            Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    // -- Cost / OAuth usage -------------------------------------------------------
+    if show_cost {
+        lines.push(Line::from(vec![
+            Span::styled(" Session cost:  ", Style::default().fg(Color::White)),
+            Span::styled(
+                format!("${:.4}", cost_usd),
+                Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    } else {
+        let remaining = context_total.saturating_sub(context_used);
+        lines.push(Line::from(vec![
+            Span::styled(" Session usage: ", Style::default().fg(Color::White)),
+            Span::styled(
+                format!(
+                    "{} tokens used · {} remaining",
+                    format_tokens(context_used),
+                    format_tokens(remaining)
+                ),
+                Style::default().fg(CLAURST_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
 
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -216,7 +236,7 @@ mod tests {
         let mut state = ContextVizState::new();
         state.open();
         terminal.draw(|frame| {
-            render_context_viz(frame, &state, frame.area(), 50_000, 200_000, Some(0.3), Some(0.1), 0.42);
+            render_context_viz(frame, &state, frame.area(), 50_000, 200_000, Some(0.3), Some(0.1), 0.42, true);
         }).unwrap();
         let content: String = terminal.backend().buffer().clone().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -225,12 +245,29 @@ mod tests {
     }
 
     #[test]
+    fn context_viz_oauth_usage_hides_cost() {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut state = ContextVizState::new();
+        state.open();
+        terminal.draw(|frame| {
+            render_context_viz(frame, &state, frame.area(), 50_000, 200_000, Some(0.3), Some(0.1), 99.0, false);
+        }).unwrap();
+        let content: String = terminal.backend().buffer().clone().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("Session usage"));
+        assert!(content.contains("tokens used"));
+        assert!(!content.contains("Session cost"));
+        assert!(!content.contains("$99"));
+    }
+
+    #[test]
     fn context_viz_hidden_renders_nothing() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let state = ContextVizState::new();
         let before = terminal.backend().buffer().clone();
         terminal.draw(|frame| {
-            render_context_viz(frame, &state, frame.area(), 0, 0, None, None, 0.0);
+            render_context_viz(frame, &state, frame.area(), 0, 0, None, None, 0.0, true);
         }).unwrap();
         assert_eq!(terminal.backend().buffer().content(), before.content());
     }

@@ -936,6 +936,10 @@ pub struct App {
     pub total_message_lines: Cell<usize>,
     /// Scroll offset from the last render frame (used for selection validation).
     pub last_render_scroll_offset: Cell<u16>,
+    /// Maximum scrollback offset from the last render, measured in transcript
+    /// rows above the bottom. Used to clamp PageUp/wheel bursts so scrolling
+    /// back down never gets stuck behind an oversized logical offset.
+    pub last_render_max_scroll_offset: Cell<usize>,
 
     // ---- Text selection state --------------------------------------------
     /// Selection drag anchor (col, row) — set on mouse-down.
@@ -1332,6 +1336,7 @@ impl App {
             message_row_map: RefCell::new(std::collections::HashMap::new()),
             total_message_lines: Cell::new(0),
             last_render_scroll_offset: Cell::new(0),
+            last_render_max_scroll_offset: Cell::new(0),
             selection_anchor: None,
             selection_focus: None,
             selection_text: RefCell::new(String::new()),
@@ -2482,6 +2487,37 @@ impl App {
             self.scroll_accel = 3.0;
         }
         self.scroll_accel.round() as usize
+    }
+
+    fn scroll_transcript_up(&mut self, rows: usize) {
+        let max_scroll = self.last_render_max_scroll_offset.get();
+        if max_scroll == 0 {
+            self.scroll_offset = 0;
+            self.auto_scroll = true;
+            return;
+        }
+
+        self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max_scroll);
+        self.auto_scroll = false;
+    }
+
+    fn scroll_transcript_down(&mut self, rows: usize) {
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.last_render_max_scroll_offset.get())
+            .saturating_sub(rows);
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+            self.new_messages_while_scrolled = 0;
+        }
+    }
+
+    pub fn uses_oauth_usage_limits(&self) -> bool {
+        matches!(
+            self.config.provider.as_deref(),
+            Some("codex" | "openai-codex")
+        ) || self.model_name.starts_with("codex/")
+            || self.model_name.starts_with("openai-codex/")
     }
 
     /// Open the rewind flow with the current message list converted to
@@ -3840,17 +3876,11 @@ impl App {
             // ---- Message boundary navigation (Alt+Up/Alt+Down) ----------
             KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                 // Jump up by ~20 lines (approximate message boundary).
-                self.scroll_offset = self.scroll_offset.saturating_add(20);
-                self.auto_scroll = false;
+                self.scroll_transcript_up(20);
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
                 // Jump down by ~20 lines (approximate message boundary).
-                let new_off = self.scroll_offset.saturating_sub(20);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    self.auto_scroll = true;
-                    self.new_messages_while_scrolled = 0;
-                }
+                self.scroll_transcript_down(20);
             }
 
             // ---- Input history navigation ------------------------------
@@ -3873,18 +3903,10 @@ impl App {
 
             // ---- Scroll ------------------------------------------------
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-                // Scrolling up disables auto-follow.
-                self.auto_scroll = false;
+                self.scroll_transcript_up(10);
             }
             KeyCode::PageDown => {
-                let new_off = self.scroll_offset.saturating_sub(10);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    // Scrolled all the way back to bottom — re-enable auto-follow.
-                    self.auto_scroll = true;
-                    self.new_messages_while_scrolled = 0;
-                }
+                self.scroll_transcript_down(10);
             }
 
             // ---- Toggle last thinking block (t key) -------------------
@@ -4322,17 +4344,11 @@ impl App {
                 false
             }
             "scrollUp" => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-                self.auto_scroll = false;
+                self.scroll_transcript_up(10);
                 false
             }
             "scrollDown" => {
-                let new_off = self.scroll_offset.saturating_sub(10);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    self.auto_scroll = true;
-                    self.new_messages_while_scrolled = 0;
-                }
+                self.scroll_transcript_down(10);
                 false
             }
             "yes" => {
@@ -4424,17 +4440,12 @@ impl App {
             }
             "previousMessage" => {
                 // Alt+←: Navigate to previous message in transcript
-                self.scroll_offset = self.scroll_offset.saturating_add(5);
-                self.auto_scroll = false;
+                self.scroll_transcript_up(5);
                 false
             }
             "nextMessage" => {
                 // Alt+→: Navigate to next message in transcript
-                let new_off = self.scroll_offset.saturating_sub(5);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    self.auto_scroll = true;
-                }
+                self.scroll_transcript_down(5);
                 false
             }
             "jumpToNextError" => {
@@ -4968,19 +4979,13 @@ impl App {
                 // Don't consume Ctrl+Scroll — let the terminal handle zoom.
                 if !mouse_event.modifiers.contains(KeyModifiers::CONTROL) {
                     let step = self.scroll_step();
-                    self.scroll_offset = self.scroll_offset.saturating_add(step);
-                    self.auto_scroll = false;
+                    self.scroll_transcript_up(step);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if !mouse_event.modifiers.contains(KeyModifiers::CONTROL) {
                     let step = self.scroll_step();
-                    let new_off = self.scroll_offset.saturating_sub(step);
-                    self.scroll_offset = new_off;
-                    if new_off == 0 {
-                        self.auto_scroll = true;
-                        self.new_messages_while_scrolled = 0;
-                    }
+                    self.scroll_transcript_down(step);
                 }
             }
             // ---- Right-click context menu ----------------------------------

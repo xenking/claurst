@@ -688,6 +688,56 @@ mod tests {
     }
 
     #[test]
+    fn test_render_app_hides_cost_for_openai_codex_oauth() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = make_app();
+        app.config.provider = Some("openai-codex".to_string());
+        app.model_name = "openai-codex/gpt-5.5".to_string();
+        app.context_window_size = 400_000;
+        app.context_used_tokens = 12_345;
+        app.cost_usd = 12.34;
+
+        terminal
+            .draw(|frame| crate::render::render_app(frame, &app))
+            .unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(!rendered.contains("$12"));
+    }
+
+    #[test]
+    fn test_transcript_scroll_down_recovers_from_overscroll() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = make_app();
+        for i in 0..80 {
+            app.push_message(claurst_core::types::Message::user(format!("message {}", i)));
+        }
+
+        terminal
+            .draw(|frame| crate::render::render_app(frame, &app))
+            .unwrap();
+        let max_scroll = app.last_render_max_scroll_offset.get();
+        assert!(max_scroll > 10);
+
+        app.auto_scroll = false;
+        app.scroll_offset = max_scroll + 10_000;
+        app.handle_key_event(key(KeyCode::PageDown));
+
+        assert_eq!(app.scroll_offset, max_scroll.saturating_sub(10));
+        assert!(!app.auto_scroll);
+    }
+
+    #[test]
     fn test_render_app_shows_startup_notices_below_logo_header() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -807,6 +857,7 @@ mod tests {
     #[test]
     fn test_page_scroll() {
         let mut app = make_app();
+        app.last_render_max_scroll_offset.set(100);
         app.handle_key_event(key(KeyCode::PageUp));
         assert_eq!(app.scroll_offset, 10);
         app.handle_key_event(key(KeyCode::PageDown));
