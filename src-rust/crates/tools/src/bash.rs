@@ -1,6 +1,9 @@
 // Bash tool: execute shell commands with timeout, streaming output, and
 // persistent shell state (cwd + env) across invocations.
 
+use crate::rtk::{
+    attach_rtk_metadata, classify_effective_bash_command, maybe_rewrite_for_tool,
+};
 use crate::{PermissionLevel, ShellState, Tool, ToolContext, ToolResult, session_shell_state};
 use async_trait::async_trait;
 use claurst_core::bash_classifier::{BashRiskLevel, classify_bash_command};
@@ -392,6 +395,16 @@ impl Tool for BashTool {
             ));
         }
 
+        let rtk_decision = maybe_rewrite_for_tool(&params.command, ctx, self.name()).await;
+        let command = rtk_decision.effective_command.clone();
+        if classify_effective_bash_command(&command) == BashRiskLevel::Critical {
+            return ToolResult::error(format!(
+                "Command blocked after RTK rewrite: classified as Critical risk by the bash security classifier.\n\
+                 Original: {}\nRewritten: {}",
+                params.command, command
+            ));
+        }
+
         let timeout_ms = params.timeout.min(600_000);
 
         // Retrieve the persistent shell state for this session.
@@ -403,29 +416,33 @@ impl Tool for BashTool {
                 let state = shell_state_arc.lock();
                 state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
             };
-            return run_in_background(
-                params.command,
+            let result = run_in_background(
+                command,
                 cwd,
                 timeout_ms,
                 params.notify_on_complete,
                 ctx.completion_notifier.clone(),
             ).await;
+            return attach_rtk_metadata(result, &rtk_decision);
         }
 
         // ── Foreground path ──────────────────────────────────────────────────
         let timeout_dur = Duration::from_millis(timeout_ms);
 
-        debug!(command = %params.command, "Executing bash command");
+        debug!(command = %command, original_command = %params.command, "Executing bash command");
 
         // On Windows fall back to a simpler cmd invocation without state wrapping.
         if cfg!(windows) {
-            return self.execute_windows(&params.command, ctx, &shell_state_arc, timeout_dur, timeout_ms).await;
+            let result = self
+                .execute_windows(&command, ctx, &shell_state_arc, timeout_dur, timeout_ms)
+                .await;
+            return attach_rtk_metadata(result, &rtk_decision);
         }
 
         // Build a wrapper script that restores and then captures shell state.
         let script = {
             let state = shell_state_arc.lock();
-            build_wrapper_script(&params.command, &state, &ctx.working_dir)
+            build_wrapper_script(&command, &state, &ctx.working_dir)
         };
 
         let mut child = match Command::new("bash")
@@ -503,7 +520,7 @@ impl Tool for BashTool {
                 // for simple export statements that might not show up in the env
                 // dump if the command exited early).
                 {
-                    let exports = extract_exports_from_command(&params.command);
+                    let exports = extract_exports_from_command(&command);
                     if !exports.is_empty() {
                         let mut state = shell_state_arc.lock();
                         for (k, v) in exports {
@@ -542,17 +559,20 @@ impl Tool for BashTool {
                 }
 
                 if exit_code != 0 {
-                    ToolResult::error(format!(
+                    attach_rtk_metadata(ToolResult::error(format!(
                         "Command exited with code {}\n{}",
                         exit_code, output
-                    ))
+                    )), &rtk_decision)
                 } else {
-                    ToolResult::success(output)
+                    attach_rtk_metadata(ToolResult::success(output), &rtk_decision)
                 }
             }
             Err(_) => {
                 let _ = child.kill().await;
-                ToolResult::error(format!("Command timed out after {}ms", timeout_ms))
+                attach_rtk_metadata(
+                    ToolResult::error(format!("Command timed out after {}ms", timeout_ms)),
+                    &rtk_decision,
+                )
             }
         }
     }
@@ -662,6 +682,9 @@ impl BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContext;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
 
     #[test]
     fn notify_on_complete_in_schema() {
@@ -700,5 +723,112 @@ mod tests {
         let input: BashInput =
             serde_json::from_str(r#"{"command":"echo hi"}"#).unwrap();
         assert!(!input.run_in_background);
+    }
+
+    #[cfg(unix)]
+    fn executable_fake_rtk(script: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let rtk = temp.path().join("rtk");
+        std::fs::write(&rtk, script).expect("write fake rtk");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&rtk, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake rtk");
+        (temp, rtk)
+    }
+
+    #[cfg(unix)]
+    fn bypass_context(working_dir: PathBuf, rtk_binary: PathBuf) -> ToolContext {
+        let mut config = claurst_core::config::Config::default();
+        config.rtk.binary = rtk_binary.to_string_lossy().into_owned();
+        ToolContext {
+            working_dir,
+            permission_mode: claurst_core::config::PermissionMode::BypassPermissions,
+            permission_handler: Arc::new(claurst_core::permissions::AutoPermissionHandler {
+                mode: claurst_core::config::PermissionMode::BypassPermissions,
+            }),
+            cost_tracker: claurst_core::cost::CostTracker::new(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            file_history: Arc::new(parking_lot::Mutex::new(
+                claurst_core::file_history::FileHistory::new(),
+            )),
+            current_turn: Arc::new(AtomicUsize::new(0)),
+            non_interactive: true,
+            mcp_manager: None,
+            config,
+            managed_agent_config: None,
+            completion_notifier: None,
+            pending_permissions: None,
+            permission_manager: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_tool_executes_rtk_rewritten_command() {
+        let (_rtk_temp, rtk) = executable_fake_rtk(
+            r#"#!/usr/bin/env bash
+if [ "$1" = rewrite ] && [ "$2" = "echo raw" ]; then
+  echo "echo compact"
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let work = tempfile::tempdir().expect("workdir");
+        let ctx = bypass_context(work.path().to_path_buf(), rtk);
+
+        let result = BashTool
+            .execute(
+                json!({
+                    "command": "echo raw",
+                    "timeout": 10000
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert_eq!(result.content, "compact");
+        assert_eq!(
+            result.metadata.as_ref().and_then(|meta| meta["rtk"]["status"].as_str()),
+            Some("rewritten")
+        );
+        assert_eq!(
+            result
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta["rtk"]["effective_command"].as_str()),
+            Some("echo compact")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_tool_blocks_critical_rtk_rewrite() {
+        let (_rtk_temp, rtk) = executable_fake_rtk(
+            r#"#!/usr/bin/env bash
+if [ "$1" = rewrite ]; then
+  echo "rtk rm -rf /"
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let work = tempfile::tempdir().expect("workdir");
+        let ctx = bypass_context(work.path().to_path_buf(), rtk);
+
+        let result = BashTool
+            .execute(
+                json!({
+                    "command": "git status",
+                    "timeout": 10000
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Command blocked after RTK rewrite"));
+        assert!(result.content.contains("rtk rm -rf /"));
     }
 }

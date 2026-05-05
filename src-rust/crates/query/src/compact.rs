@@ -487,7 +487,15 @@ pub fn format_compact_summary(raw: &str) -> String {
 /// Return the effective context-window size in tokens for the given model.
 /// These are approximate; the API enforces the real limits server-side.
 pub fn context_window_for_model(model: &str) -> u64 {
-    if model.contains("opus-4") || model.contains("sonnet-4") || model.contains("haiku-4") {
+    let model = model
+        .rsplit_once('/')
+        .map(|(_, model)| model)
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+
+    if let Some(window) = claurst_core::codex_oauth::codex_model_context_window(&model) {
+        window as u64
+    } else if model.contains("opus-4") || model.contains("sonnet-4") || model.contains("haiku-4") {
         200_000
     } else if model.contains("claude-3-5") || model.contains("claude-3.5") {
         200_000
@@ -1390,6 +1398,12 @@ mod tests {
     #[test]
     fn test_context_window_opus4() {
         assert_eq!(context_window_for_model("claude-opus-4-0"), 200_000);
+    }
+
+    #[test]
+    fn test_context_window_codex_gpt55() {
+        assert_eq!(context_window_for_model("openai-codex/gpt-5.5"), 272_000);
+        assert_eq!(context_window_for_model("gpt-5.5"), 272_000);
     }
 
     #[test]

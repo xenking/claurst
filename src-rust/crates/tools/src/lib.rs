@@ -21,6 +21,7 @@ pub mod pty_bash;
 pub mod brief;
 pub mod config_tool;
 pub mod cron;
+pub mod cli_inspection;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod apply_patch;
@@ -47,6 +48,7 @@ pub mod worktree;
 pub mod computer_use;
 pub mod mcp_auth_tool;
 pub mod repl_tool;
+pub mod rtk;
 pub mod synthetic_output;
 pub mod team_tool;
 pub mod remote_trigger;
@@ -60,6 +62,7 @@ pub use bash::BashTool;
 pub use pty_bash::PtyBashTool;
 pub use brief::BriefTool;
 pub use config_tool::ConfigTool;
+pub use cli_inspection::{FffqTool, GraphifyqTool, OmxMemoryTool};
 pub use cron::{CronCreateTool, CronDeleteTool, CronListTool};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
@@ -86,6 +89,7 @@ pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 pub use computer_use::ComputerUseTool;
 pub use mcp_auth_tool::McpAuthTool;
 pub use repl_tool::ReplTool;
+pub use rtk::RtkTool;
 pub use synthetic_output::SyntheticOutputTool;
 pub use team_tool::{TeamCreateTool, TeamDeleteTool, register_agent_runner, AgentRunFn};
 pub use remote_trigger::RemoteTriggerTool;
@@ -490,6 +494,10 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(ApplyPatchTool),
         Box::new(GlobTool),
         Box::new(GrepTool),
+        Box::new(FffqTool),
+        Box::new(GraphifyqTool),
+        Box::new(OmxMemoryTool),
+        Box::new(RtkTool),
         Box::new(WebFetchTool),
         Box::new(WebSearchTool),
         Box::new(NotebookEditTool),
@@ -663,7 +671,7 @@ mod tests {
     fn test_core_tools_present() {
         let expected = [
             "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-            "WebFetch", "WebSearch",
+            "Fffq", "Graphifyq", "OmxMemory", "Rtk", "WebFetch", "WebSearch",
             "TodoWrite", "Skill",
         ];
         for name in &expected {

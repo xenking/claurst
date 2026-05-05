@@ -33,12 +33,21 @@ use claurst_core::keybindings::{
 };
 use claurst_core::types::{ContentBlock, Message, Role};
 use claurst_query::QueryEvent;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::style::Color;
 use ratatui::Terminal;
 use std::cell::{Cell, RefCell};
 use std::io::Stdout;
+use std::path::Path;
+use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
@@ -88,6 +97,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("resume", "Resume a previous session"),
     ("review", "Review changes (git diff)"),
     ("rewind", "Rewind to an earlier turn"),
+    ("rtk", "Configure RTK command rewriting"),
     ("session", "Browse and manage sessions"),
     ("settings", "Open settings"),
     ("stats", "Open token and cost stats"),
@@ -97,6 +107,39 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("vim", "Toggle vim keybindings"),
     ("voice", "Toggle voice input mode"),
 ];
+
+fn memory_editor_command(editor: &str, path: &Path) -> Command {
+    let mut command = Command::new(editor);
+    if cfg!(target_os = "macos") && editor == "open" {
+        command.arg("-t").arg("-W");
+    }
+    command.arg(path);
+    command
+}
+
+fn suspend_tui_for_child_process() {
+    let _ = disable_raw_mode();
+    let mut stdout = std::io::stdout();
+    let _ = execute!(
+        stdout,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        crossterm::cursor::Show,
+    );
+}
+
+fn resume_tui_after_child_process() {
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
+    let _ = enable_raw_mode();
+}
+
+fn run_memory_editor(editor: &str, path: &Path) -> std::io::Result<ExitStatus> {
+    suspend_tui_for_child_process();
+    let result = memory_editor_command(editor, path).status();
+    resume_tui_after_child_process();
+    result
+}
 
 fn help_command_category(name: &str) -> &'static str {
     match name {
@@ -673,7 +716,7 @@ pub struct App {
     pub has_credentials: bool,
     /// Current effort level (controls extended-thinking budget_tokens).
     pub effort_level: EffortLevel,
-    /// Whether fast mode is currently active (model locked to FAST_MODE_MODEL).
+    /// Whether fast transport mode is currently active (does not change model).
     pub fast_mode: bool,
     /// Active speech mode: None = normal, Some("caveman") / Some("rocky").
     pub speech_mode: Option<String>,
@@ -936,6 +979,10 @@ pub struct App {
     pub total_message_lines: Cell<usize>,
     /// Scroll offset from the last render frame (used for selection validation).
     pub last_render_scroll_offset: Cell<u16>,
+    /// Maximum scrollback offset from the last render, measured in transcript
+    /// rows above the bottom. Used to clamp PageUp/wheel bursts so scrolling
+    /// back down never gets stuck behind an oversized logical offset.
+    pub last_render_max_scroll_offset: Cell<usize>,
 
     // ---- Text selection state --------------------------------------------
     /// Selection drag anchor (col, row) — set on mouse-down.
@@ -1332,6 +1379,7 @@ impl App {
             message_row_map: RefCell::new(std::collections::HashMap::new()),
             total_message_lines: Cell::new(0),
             last_render_scroll_offset: Cell::new(0),
+            last_render_max_scroll_offset: Cell::new(0),
             selection_anchor: None,
             selection_focus: None,
             selection_text: RefCell::new(String::new()),
@@ -1778,6 +1826,51 @@ impl App {
         }
     }
 
+    fn open_selected_memory_file(&mut self) {
+        let Some(path) = self
+            .memory_file_selector
+            .selected_path()
+            .map(std::path::PathBuf::from)
+        else {
+            self.status_message = Some("No memory file selected.".to_string());
+            return;
+        };
+
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                self.status_message = Some(format!("Could not create {}: {}", parent.display(), err));
+                return;
+            }
+        }
+        if !path.exists() {
+            if let Err(err) = std::fs::write(&path, "") {
+                self.status_message = Some(format!("Could not create {}: {}", path.display(), err));
+                return;
+            }
+        }
+
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| {
+                if cfg!(target_os = "macos") {
+                    "open".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+
+        let result = run_memory_editor(&editor, &path);
+        self.memory_file_selector.close();
+        match result {
+            Ok(_) => {
+                self.status_message = Some(format!("Edited memory file: {}", path.display()));
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Could not open {}: {}", path.display(), err));
+            }
+        }
+    }
+
     /// Update the context window size from the model registry for the current model.
     pub fn refresh_context_window_size(&mut self) {
         let provider = self.config.provider.as_deref().unwrap_or("anthropic");
@@ -1791,6 +1884,10 @@ impl App {
             self.context_window_size = match provider {
                 "anthropic" => 200_000,
                 "openai" => 128_000,
+                "codex" | "openai-codex" => {
+                    claurst_core::codex_oauth::codex_model_context_window(model_id)
+                        .unwrap_or(128_000) as u64
+                }
                 "google" => 1_048_576,
                 _ => 128_000,
             };
@@ -1861,7 +1958,26 @@ impl App {
     /// Handle slash commands that should open UI screens rather than execute
     /// as normal commands. Returns `true` if the command was intercepted.
     pub fn intercept_slash_command_with_args(&mut self, cmd: &str, args: &str) -> bool {
-        if cmd == "mcp" && !args.trim().is_empty() {
+        // Let argument-bearing commands that mutate config or perform actions
+        // go through the slash-command executor instead of opening a picker.
+        if !args.trim().is_empty()
+            && matches!(
+                cmd,
+                "effort"
+                    | "fast"
+                    | "speed"
+                    | "mcp"
+                    | "memory"
+                    | "model"
+                    | "resume"
+                    | "rtk"
+                    | "session"
+                    | "theme"
+                    | "vi"
+                    | "vim"
+                    | "voice"
+            )
+        {
             return false;
         }
         self.intercept_slash_command(cmd)
@@ -1981,10 +2097,9 @@ impl App {
                 true
             }
             "fast" => {
-                self.fast_mode = !self.fast_mode;
-                let status = if self.fast_mode { "enabled" } else { "disabled" };
-                self.status_message = Some(format!("Fast mode {}.", status));
-                true
+                // Let the slash-command executor persist and apply the
+                // transport-level fast-mode flag. It must not switch model.
+                false
             }
             "plan" => {
                 use claurst_core::config::PermissionMode;
@@ -2387,6 +2502,35 @@ impl App {
         self.on_new_message();
     }
 
+    pub fn paste_clipboard_into_prompt(&mut self) -> bool {
+        use crate::image_paste::{read_clipboard_image, read_clipboard_text, read_primary_text};
+
+        if let Some(img) = read_clipboard_image() {
+            let label = img.label.clone();
+            let dims = img.dimensions;
+            self.prompt_input.add_image(img);
+            let msg = if let Some((w, h)) = dims {
+                format!("Image attached: {} ({}x{})", label, w, h)
+            } else {
+                format!("Image attached: {}", label)
+            };
+            self.notifications.push(NotificationKind::Info, msg, Some(3));
+            return true;
+        }
+
+        if let Some(text) = read_clipboard_text().or_else(read_primary_text) {
+            self.paste_text_into_prompt(&text);
+            return true;
+        }
+
+        false
+    }
+
+    pub fn paste_text_into_prompt(&mut self, text: &str) {
+        self.prompt_input.paste(text);
+        self.refresh_prompt_input();
+    }
+
     /// Push a synthetic system annotation into the conversation pane.
     /// It will appear after the current last message.
     pub fn push_system_message(&mut self, text: String, style: SystemMessageStyle) {
@@ -2482,6 +2626,72 @@ impl App {
             self.scroll_accel = 3.0;
         }
         self.scroll_accel.round() as usize
+    }
+
+    fn scroll_transcript_up(&mut self, source: &'static str, rows: usize) {
+        let before_offset = self.scroll_offset;
+        let before_auto_scroll = self.auto_scroll;
+        let max_scroll = self.last_render_max_scroll_offset.get();
+        if max_scroll == 0 {
+            self.scroll_offset = 0;
+            self.auto_scroll = true;
+            debug!(
+                source,
+                rows,
+                before_offset,
+                after_offset = self.scroll_offset,
+                max_scroll,
+                before_auto_scroll,
+                after_auto_scroll = self.auto_scroll,
+                "transcript scroll up ignored; content fits viewport"
+            );
+            return;
+        }
+
+        self.scroll_offset = self.scroll_offset.saturating_add(rows).min(max_scroll);
+        self.auto_scroll = false;
+        debug!(
+            source,
+            rows,
+            before_offset,
+            after_offset = self.scroll_offset,
+            max_scroll,
+            before_auto_scroll,
+            after_auto_scroll = self.auto_scroll,
+            "transcript scroll up"
+        );
+    }
+
+    fn scroll_transcript_down(&mut self, source: &'static str, rows: usize) {
+        let before_offset = self.scroll_offset;
+        let before_auto_scroll = self.auto_scroll;
+        let max_scroll = self.last_render_max_scroll_offset.get();
+        self.scroll_offset = self
+            .scroll_offset
+            .min(max_scroll)
+            .saturating_sub(rows);
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+            self.new_messages_while_scrolled = 0;
+        }
+        debug!(
+            source,
+            rows,
+            before_offset,
+            after_offset = self.scroll_offset,
+            max_scroll,
+            before_auto_scroll,
+            after_auto_scroll = self.auto_scroll,
+            "transcript scroll down"
+        );
+    }
+
+    pub fn uses_oauth_usage_limits(&self) -> bool {
+        matches!(
+            self.config.provider.as_deref(),
+            Some("codex" | "openai-codex")
+        ) || self.model_name.starts_with("codex/")
+            || self.model_name.starts_with("openai-codex/")
     }
 
     /// Open the rewind flow with the current message list converted to
@@ -3047,11 +3257,6 @@ impl App {
                 KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => self.model_picker.select_next(),
                 KeyCode::Enter => {
                     if let Some((model_id, effort)) = self.model_picker.confirm() {
-                        // If user picked a model other than the fast-mode model
-                        // while fast mode was active, turn fast mode off.
-                        if self.fast_mode && !self.model_picker.is_selected_fast_mode_model(&model_id) {
-                            self.fast_mode = false;
-                        }
                         if let Some(e) = effort {
                             self.effort_level = e;
                         }
@@ -3251,15 +3456,14 @@ impl App {
             return false;
         }
 
-        // Memory file selector intercepts navigation and Esc
+        // Memory file selector intercepts navigation and selection
         if self.memory_file_selector.visible {
             match key.code {
                 KeyCode::Esc => self.memory_file_selector.close(),
                 KeyCode::Up => self.memory_file_selector.select_prev(),
                 KeyCode::Down => self.memory_file_selector.select_next(),
-                KeyCode::Enter => {
-                    // Selection acknowledged — consumer can read selected_path()
-                    self.memory_file_selector.close();
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.open_selected_memory_file();
                 }
                 _ => {}
             }
@@ -3473,6 +3677,52 @@ impl App {
             }
         }
 
+        // ---- Cmd+C — macOS copy without quitting ------------------------
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::SUPER) {
+            let sel_text = self.selection_text.borrow().clone();
+            if self.selection_anchor.is_some() && !sel_text.is_empty() {
+                let copied = crate::image_paste::write_clipboard_text(&sel_text);
+                self.selection_anchor = None;
+                self.selection_focus = None;
+                *self.selection_text.borrow_mut() = String::new();
+                if copied {
+                    self.notifications.push(NotificationKind::Info, "Copied to clipboard".to_string(), Some(2));
+                } else {
+                    self.notifications.push(NotificationKind::Warning, "Clipboard unavailable".to_string(), Some(3));
+                }
+            } else {
+                let last = self.messages.iter().rev()
+                    .find(|m| m.role == Role::Assistant)
+                    .map(|m| m.get_all_text());
+                if let Some(text) = last {
+                    if try_copy_to_clipboard(&text) {
+                        self.notifications.push(NotificationKind::Info, "Copied last assistant message".to_string(), Some(2));
+                    } else {
+                        self.notifications.push(NotificationKind::Warning, "Clipboard unavailable".to_string(), Some(3));
+                    }
+                } else {
+                    self.notifications.push(NotificationKind::Warning, "No selection or assistant message to copy".to_string(), Some(3));
+                }
+            }
+            return false;
+        }
+
+        // ---- Ctrl/Cmd+V — clipboard paste (image first, then text fallback) ----
+        // Run before keybindings so unbound Cmd/Ctrl+V cannot swallow image paste.
+        if key.code == KeyCode::Char('v')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
+            && !matches!(
+                self.prompt_input.vim_mode,
+                crate::prompt_input::VimMode::Normal
+                    | crate::prompt_input::VimMode::Visual
+                    | crate::prompt_input::VimMode::VisualBlock
+            )
+        {
+            let _ = self.paste_clipboard_into_prompt();
+            return false;
+        }
+
         // ---- Keybinding processor (runs AFTER all dialog checks) ----------
         let key_context = self.current_key_context();
         if let Some(keystroke) = key_event_to_keystroke(&key) {
@@ -3490,7 +3740,7 @@ impl App {
         }
 
         // Clear any active text selection on key press (except Ctrl+C which copies it).
-        let is_copy = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_copy = key.code == KeyCode::Char('c') && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER));
         if !is_copy && self.selection_anchor.is_some() {
             self.selection_anchor = None;
             self.selection_focus = None;
@@ -3567,11 +3817,12 @@ impl App {
             return false;
         }
 
-        // ---- Ctrl+V — clipboard paste (image first, then text fallback) ----
+        // ---- Ctrl/Cmd+V — clipboard paste (image first, then text fallback) ----
         // Only fires when NOT in vim Normal/Visual/VisualBlock mode (where \x16 is
         // already consumed by the vim handler above to enter VisualBlock mode).
         if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
             && !matches!(
                 self.prompt_input.vim_mode,
                 crate::prompt_input::VimMode::Normal
@@ -3579,21 +3830,7 @@ impl App {
                     | crate::prompt_input::VimMode::VisualBlock
             )
         {
-            use crate::image_paste::{read_clipboard_image, read_clipboard_text, read_primary_text};
-            if let Some(img) = read_clipboard_image() {
-                let label = img.label.clone();
-                let dims = img.dimensions;
-                self.prompt_input.add_image(img);
-                let msg = if let Some((w, h)) = dims {
-                    format!("Image attached: {} ({}x{})", label, w, h)
-                } else {
-                    format!("Image attached: {}", label)
-                };
-                self.notifications.push(NotificationKind::Info, msg, Some(3));
-            } else if let Some(text) = read_clipboard_text().or_else(read_primary_text) {
-                self.prompt_input.paste(&text);
-                self.refresh_prompt_input();
-            }
+            let _ = self.paste_clipboard_into_prompt();
             return false;
         }
 
@@ -3752,7 +3989,12 @@ impl App {
             }
 
             // ---- Text entry (blocked while streaming) ------------------
-            KeyCode::Char(c) if !self.is_streaming => {
+            KeyCode::Char(c)
+                if !self.is_streaming
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && !key.modifiers.contains(KeyModifiers::SUPER) =>
+            {
                 if self.prompt_input.vim_enabled && self.prompt_input.vim_mode != VimMode::Insert {
                     self.prompt_input.vim_command(&c.to_string());
                 } else {
@@ -3840,17 +4082,11 @@ impl App {
             // ---- Message boundary navigation (Alt+Up/Alt+Down) ----------
             KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                 // Jump up by ~20 lines (approximate message boundary).
-                self.scroll_offset = self.scroll_offset.saturating_add(20);
-                self.auto_scroll = false;
+                self.scroll_transcript_up("key.alt_up", 20);
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
                 // Jump down by ~20 lines (approximate message boundary).
-                let new_off = self.scroll_offset.saturating_sub(20);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    self.auto_scroll = true;
-                    self.new_messages_while_scrolled = 0;
-                }
+                self.scroll_transcript_down("key.alt_down", 20);
             }
 
             // ---- Input history navigation ------------------------------
@@ -3873,18 +4109,10 @@ impl App {
 
             // ---- Scroll ------------------------------------------------
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-                // Scrolling up disables auto-follow.
-                self.auto_scroll = false;
+                self.scroll_transcript_up("key.page_up", 10);
             }
             KeyCode::PageDown => {
-                let new_off = self.scroll_offset.saturating_sub(10);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    // Scrolled all the way back to bottom — re-enable auto-follow.
-                    self.auto_scroll = true;
-                    self.new_messages_while_scrolled = 0;
-                }
+                self.scroll_transcript_down("key.page_down", 10);
             }
 
             // ---- Toggle last thinking block (t key) -------------------
@@ -4322,17 +4550,11 @@ impl App {
                 false
             }
             "scrollUp" => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
-                self.auto_scroll = false;
+                self.scroll_transcript_up("keybinding.scroll_up", 10);
                 false
             }
             "scrollDown" => {
-                let new_off = self.scroll_offset.saturating_sub(10);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    self.auto_scroll = true;
-                    self.new_messages_while_scrolled = 0;
-                }
+                self.scroll_transcript_down("keybinding.scroll_down", 10);
                 false
             }
             "yes" => {
@@ -4424,17 +4646,12 @@ impl App {
             }
             "previousMessage" => {
                 // Alt+←: Navigate to previous message in transcript
-                self.scroll_offset = self.scroll_offset.saturating_add(5);
-                self.auto_scroll = false;
+                self.scroll_transcript_up("keybinding.previous_message", 5);
                 false
             }
             "nextMessage" => {
                 // Alt+→: Navigate to next message in transcript
-                let new_off = self.scroll_offset.saturating_sub(5);
-                self.scroll_offset = new_off;
-                if new_off == 0 {
-                    self.auto_scroll = true;
-                }
+                self.scroll_transcript_down("keybinding.next_message", 5);
                 false
             }
             "jumpToNextError" => {
@@ -4968,19 +5185,13 @@ impl App {
                 // Don't consume Ctrl+Scroll — let the terminal handle zoom.
                 if !mouse_event.modifiers.contains(KeyModifiers::CONTROL) {
                     let step = self.scroll_step();
-                    self.scroll_offset = self.scroll_offset.saturating_add(step);
-                    self.auto_scroll = false;
+                    self.scroll_transcript_up("mouse.wheel_up", step);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if !mouse_event.modifiers.contains(KeyModifiers::CONTROL) {
                     let step = self.scroll_step();
-                    let new_off = self.scroll_offset.saturating_sub(step);
-                    self.scroll_offset = new_off;
-                    if new_off == 0 {
-                        self.auto_scroll = true;
-                        self.new_messages_while_scrolled = 0;
-                    }
+                    self.scroll_transcript_down("mouse.wheel_down", step);
                 }
             }
             // ---- Right-click context menu ----------------------------------
@@ -5365,6 +5576,7 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> anyhow::Result<Option<String>> {
+        let mut ignore_enter_after_paste_until: Option<std::time::Instant> = None;
         loop {
             self.frame_count = self.frame_count.wrapping_add(1);
 
@@ -5479,6 +5691,14 @@ impl App {
             if event::poll(std::time::Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key) => {
+                        if key.code == KeyCode::Enter {
+                            if let Some(until) = ignore_enter_after_paste_until {
+                                if std::time::Instant::now() <= until {
+                                    ignore_enter_after_paste_until = None;
+                                    continue;
+                                }
+                            }
+                        }
                         // On Windows crossterm fires both Press and Release events.
                         // We normally skip non-press events, but when voice PTT mode
                         // is active we need the Release event for the `V` key so we
@@ -5527,8 +5747,10 @@ impl App {
                             && !self.history_search_overlay.visible
                             && self.history_search.is_none() =>
                     {
-                        self.prompt_input.paste(&data);
-                        self.refresh_prompt_input();
+                        self.paste_text_into_prompt(&data);
+                        ignore_enter_after_paste_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(250),
+                        );
                     }
                     Event::Mouse(mouse_event) => {
                         self.handle_mouse_event(mouse_event);
@@ -5619,10 +5841,35 @@ mod tests {
     }
 
     #[test]
+    fn memory_editor_command_waits_for_macos_open() {
+        let path = Path::new("/tmp/AGENTS.md");
+        let command = memory_editor_command("open", path);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(args, vec!["-t", "-W", "/tmp/AGENTS.md"]);
+        } else {
+            assert_eq!(args, vec!["/tmp/AGENTS.md"]);
+        }
+    }
+
+    #[test]
     fn test_mcp_subcommand_is_not_intercepted() {
         let mut app = make_app();
         assert!(!app.intercept_slash_command_with_args("mcp", "auth mcphub"));
         assert!(!app.mcp_view.open);
+    }
+
+    #[test]
+    fn test_argument_commands_are_not_intercepted() {
+        let mut app = make_app();
+        assert!(!app.intercept_slash_command_with_args("theme", "dark"));
+        assert!(!app.intercept_slash_command_with_args("fast", "on"));
+        assert!(!app.intercept_slash_command_with_args("rtk", "status"));
+        assert!(!app.theme_screen.visible);
     }
 
     #[test]
@@ -5811,6 +6058,19 @@ mod tests {
         app.handle_key_event(press_key(KeyCode::Char('k'), KeyModifiers::CONTROL));
 
         assert!(app.command_palette.visible);
+        assert_eq!(app.prompt_input.text, "hello");
+    }
+
+    #[test]
+    fn test_super_modified_char_does_not_insert_or_submit() {
+        let mut app = make_app();
+        app.prompt_input.text = "hello".to_string();
+        app.prompt_input.cursor = app.prompt_input.text.len();
+        app.refresh_prompt_input();
+
+        let submitted = app.handle_key_event(press_key(KeyCode::Char('x'), KeyModifiers::SUPER));
+
+        assert!(!submitted);
         assert_eq!(app.prompt_input.text, "hello");
     }
 

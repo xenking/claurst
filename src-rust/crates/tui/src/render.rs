@@ -58,6 +58,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
+use tracing::debug;
 use unicode_width::UnicodeWidthStr;
 
 // Spinner frames matching the TypeScript SpinnerGlyph: platform-specific base
@@ -660,6 +661,7 @@ pub fn render_app(frame: &mut Frame, app: &App) {
             app.rate_limit_5h_pct,
             app.rate_limit_7day_pct,
             app.cost_usd,
+            !app.uses_oauth_usage_limits(),
         );
     }
 
@@ -948,9 +950,11 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     // Compute total virtual height and apply scroll clamping.
     // When auto_scroll is on we always show the tail; otherwise we respect
     // the user's scroll_offset.
-    let content_height = lines.len() as u16;
-    let visible_height = msg_area.height;  // no borders, full height available
-    let max_scroll = content_height.saturating_sub(visible_height) as usize;
+    let content_height = lines.len();
+    let visible_height = msg_area.height as usize;  // no borders, full height available
+    let max_scroll = content_height.saturating_sub(visible_height);
+    let previous_max_scroll = app.last_render_max_scroll_offset.get();
+    app.last_render_max_scroll_offset.set(max_scroll);
     // scroll_offset counts lines above the bottom (0 = at bottom).
     // ratatui scroll() takes an absolute top-row index, so convert:
     //   top_row = max_scroll - scroll_offset  (clamped to [0, max_scroll])
@@ -959,6 +963,18 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         max_scroll.saturating_sub(app.scroll_offset)
     };
+    if previous_max_scroll != max_scroll || app.scroll_offset > max_scroll {
+        debug!(
+            content_height,
+            visible_height,
+            max_scroll,
+            previous_max_scroll,
+            requested_offset = app.scroll_offset,
+            auto_scroll = app.auto_scroll,
+            scroll_top = scroll,
+            "transcript scroll geometry"
+        );
+    }
 
     let mut visible_rows: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
     let mut thinking_rows: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
@@ -979,10 +995,11 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     list.viewport_height = msg_area.height;
     list.sticky_bottom = app.auto_scroll;
     list.set_items(lines);
-    list.scroll_offset = scroll as u16;
+    list.scroll_offset = scroll.min(u16::MAX as usize) as u16;
 
     // Track scroll offset for selection validation
-    app.last_render_scroll_offset.set(scroll as u16);
+    app.last_render_scroll_offset
+        .set(scroll.min(u16::MAX as usize) as u16);
 
     list.render(msg_area, frame.buffer_mut());
 
@@ -990,9 +1007,9 @@ fn render_messages(frame: &mut Frame, app: &App, area: Rect) {
     if content_height > visible_height {
         use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
-        let mut scrollbar_state = ScrollbarState::new(content_height as usize)
+        let mut scrollbar_state = ScrollbarState::new(content_height)
             .position(scroll)
-            .viewport_content_length(visible_height as usize);
+            .viewport_content_length(visible_height);
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_style(Style::default().fg(app.accent_color))  // accent thumb
@@ -2103,8 +2120,9 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             }
         }
 
-        // 3. Cost — mirrors TS formatCost: 4 decimal places for costs < $0.50, else 2.
-        if app.cost_usd > 0.0 {
+        // 3. Cost — mirrors TS formatCost for API-key billing. OAuth-backed
+        // providers are quota/limit based, so avoid showing a misleading cost.
+        if app.cost_usd > 0.0 && !app.uses_oauth_usage_limits() {
             if !parts.is_empty() {
                 parts.push(Span::raw("  "));
             }

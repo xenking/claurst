@@ -91,6 +91,9 @@ pub struct QueryConfig {
     /// thinking budget.  Also provides a temperature override when the
     /// level specifies one.
     pub effort_level: Option<claurst_core::effort::EffortLevel>,
+    /// Fast transport mode. This never changes the model; providers may use it
+    /// to opt into faster/higher-priority service tiers when available.
+    pub fast_mode: bool,
     /// T1-4: Optional shared command queue.
     ///
     /// When set, the query loop drains this queue before each API call and
@@ -141,6 +144,7 @@ impl Default for QueryConfig {
             temperature: None,
             tool_result_budget: 50_000,
             effort_level: None,
+            fast_mode: false,
             command_queue: None,
             skill_index: None,
             max_budget_usd: None,
@@ -274,6 +278,7 @@ fn build_provider_options(
     model_id: &str,
     effort_level: Option<claurst_core::effort::EffortLevel>,
     thinking_budget: Option<u32>,
+    fast_mode: bool,
 ) -> Value {
     let mut options = serde_json::Map::new();
     let model_id = model_id.to_ascii_lowercase();
@@ -310,6 +315,28 @@ fn build_provider_options(
                     serde_json::json!("low"),
                 );
             }
+        }
+    }
+
+    if provider_id == "codex" || provider_id == "openai-codex" {
+        let reasoning_effort = effort_level
+            .map(reasoning_effort_for_level)
+            .unwrap_or("medium");
+        options.insert(
+            "reasoningEffort".to_string(),
+            serde_json::json!(reasoning_effort),
+        );
+        options.insert(
+            "reasoningSummary".to_string(),
+            serde_json::json!("auto"),
+        );
+        options.insert(
+            "include".to_string(),
+            serde_json::json!(["reasoning.encrypted_content"]),
+        );
+        options.insert("textVerbosity".to_string(), serde_json::json!("medium"));
+        if fast_mode {
+            options.insert("serviceTier".to_string(), serde_json::json!("priority"));
         }
     }
 
@@ -1109,6 +1136,7 @@ pub async fn run_query_loop(
                             &model_id_str,
                             config.effort_level,
                             effective_thinking_budget,
+                            config.fast_mode,
                         ),
                     };
 
@@ -2180,6 +2208,7 @@ mod tests {
             temperature: None,
             tool_result_budget: 50_000,
             effort_level: None,
+            fast_mode: false,
             command_queue: None,
             skill_index: None,
             max_budget_usd: None,
@@ -2325,6 +2354,7 @@ mod tests {
             "gemini-3-flash-preview",
             Some(claurst_core::effort::EffortLevel::High),
             None,
+            false,
         );
         assert_eq!(
             options["thinkingConfig"]["thinkingLevel"],
@@ -2343,10 +2373,30 @@ mod tests {
             "gpt-5.4",
             Some(claurst_core::effort::EffortLevel::Medium),
             None,
+            false,
         );
         assert_eq!(options["reasoningEffort"], serde_json::json!("medium"));
         assert_eq!(options["textVerbosity"], serde_json::json!("low"));
         assert_eq!(options["usage"]["include"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_build_provider_options_for_openai_codex() {
+        let options = build_provider_options(
+            "openai-codex",
+            "gpt-5.3-codex",
+            Some(claurst_core::effort::EffortLevel::High),
+            None,
+            true,
+        );
+        assert_eq!(options["reasoningEffort"], serde_json::json!("high"));
+        assert_eq!(options["reasoningSummary"], serde_json::json!("auto"));
+        assert_eq!(
+            options["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(options["textVerbosity"], serde_json::json!("medium"));
+        assert_eq!(options["serviceTier"], serde_json::json!("priority"));
     }
 
     #[test]
@@ -2356,6 +2406,7 @@ mod tests {
             "anthropic.claude-sonnet-4-6-v1",
             Some(claurst_core::effort::EffortLevel::High),
             Some(10_000),
+            false,
         );
         assert_eq!(
             options["reasoningConfig"]["budgetTokens"],

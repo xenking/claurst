@@ -11,8 +11,11 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use claurst_core::codex_oauth::{
+    expires_at_from_now, extract_account_id_from_jwt, CODEX_AUTHORIZE_URL, CODEX_CLIENT_ID,
+    CODEX_OAUTH_PORT, CODEX_REDIRECT_URI, CODEX_SCOPES, CODEX_TOKEN_URL,
+};
 use claurst_core::oauth_config::CodexTokens;
-use claurst_core::codex_oauth::{CODEX_CLIENT_ID, CODEX_AUTHORIZE_URL, CODEX_OAUTH_PORT, CODEX_REDIRECT_URI, CODEX_SCOPES, CODEX_TOKEN_URL};
 use claurst_tui::DeviceAuthEvent;
 
 /// Generate a PKCE code verifier (random 64-byte base64url string).
@@ -211,27 +214,18 @@ async fn exchange_code_for_tokens(code: &str, verifier: &str) -> anyhow::Result<
     }
 
     let refresh_token = body["refresh_token"].as_str().map(|s| s.to_string());
-    let account_id = extract_account_id_from_jwt(&access_token);
+    let expires_at = expires_at_from_now(body["expires_in"].as_u64());
+    let account_id = body["id_token"]
+        .as_str()
+        .and_then(extract_account_id_from_jwt)
+        .or_else(|| extract_account_id_from_jwt(&access_token));
 
     Ok(CodexTokens {
         access_token,
         refresh_token,
         account_id,
-        expires_at: None,
+        expires_at,
     })
-}
-
-/// Extract chatgpt-account-id from the JWT access token.
-/// The account_id is in the middle segment (payload) under
-/// https://api.openai.com/auth.account_id
-fn extract_account_id_from_jwt(token: &str) -> Option<String> {
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    let payload_b64 = parts.get(1)?;
-    let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-    let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    json["https://api.openai.com/auth"]["account_id"]
-        .as_str()
-        .map(|s| s.to_string())
 }
 
 #[cfg(test)]

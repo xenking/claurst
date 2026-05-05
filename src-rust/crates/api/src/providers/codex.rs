@@ -9,8 +9,7 @@
 // Token refresh: if `expires_at` is in the past we POST to the OpenAI token
 //   endpoint with `grant_type=refresh_token` before making the request.
 //
-// Model list: static — the Codex endpoint does not expose a /models route,
-//   so we use the `CODEX_MODELS` constant from `claurst-core`.
+// Model list: native Codex cache first, with a baked-in fallback.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -19,7 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_stream::stream;
 use async_trait::async_trait;
 use claurst_core::codex_oauth::{
-    CODEX_API_ENDPOINT, CODEX_MODELS, CODEX_TOKEN_URL, DEFAULT_CODEX_MODEL,
+    available_codex_models, codex_model_context_window, CodexModelEntry, CODEX_API_ENDPOINT,
+    CODEX_TOKEN_URL, DEFAULT_CODEX_MODEL,
 };
 use claurst_core::oauth_config::{get_codex_tokens, save_codex_tokens, CodexTokens};
 use claurst_core::provider_id::{ModelId, ProviderId};
@@ -226,7 +226,9 @@ impl CodexProvider {
     ) -> reqwest::RequestBuilder {
         let builder = builder
             .bearer_auth(token)
-            .header("User-Agent", "claurst/0.0.9");
+            .header("User-Agent", "claurst/0.0.9")
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("originator", "claurst");
 
         if let Some(id) = account_id {
             builder.header("ChatGPT-Account-Id", id)
@@ -276,13 +278,49 @@ impl CodexProvider {
             "input": input,
             "instructions": instructions,
             "store": false,
+            "text": {
+                "verbosity": "medium",
+            },
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
         });
 
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
 
+        Self::merge_codex_provider_options(&mut body, &request.provider_options);
+
         body
+    }
+
+    fn merge_codex_provider_options(body: &mut Value, provider_options: &Value) {
+        let Some(options) = provider_options.as_object() else {
+            return;
+        };
+
+        for (key, value) in options {
+            match key.as_str() {
+                "reasoningEffort" => {
+                    body["reasoning"]["effort"] = value.clone();
+                }
+                "reasoningSummary" => {
+                    body["reasoning"]["summary"] = value.clone();
+                }
+                "textVerbosity" => {
+                    body["text"]["verbosity"] = value.clone();
+                }
+                "serviceTier" => {
+                    body["service_tier"] = value.clone();
+                }
+                "include" => {
+                    body["include"] = value.clone();
+                }
+                _ => {
+                    body[key] = value.clone();
+                }
+            }
+        }
     }
 
     fn extract_stream_error_message(json_val: &Value) -> String {
@@ -654,6 +692,13 @@ impl CodexProvider {
     }
 }
 
+fn codex_model_info_context_window(model: &CodexModelEntry) -> u32 {
+    model
+        .context_window
+        .or_else(|| codex_model_context_window(&model.id))
+        .unwrap_or(128_000)
+}
+
 // ---------------------------------------------------------------------------
 // LlmProvider impl
 // ---------------------------------------------------------------------------
@@ -1012,19 +1057,17 @@ impl LlmProvider for CodexProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let models = CODEX_MODELS
-            .iter()
-            .map(|(id, name)| ModelInfo {
-                id: ModelId::new(*id),
-                provider_id: self.id.clone(),
-                name: name.to_string(),
-                context_window: match *id {
-                    "gpt-5.4" | "gpt-5-codex" | "gpt-5-mini" => 400_000,
-                    "gpt-4.1" => 128_000,
-                    "o4-mini" => 200_000,
-                    _ => 128_000,
-                },
-                max_output_tokens: 32_768,
+        let models = available_codex_models()
+            .into_iter()
+            .map(|model| {
+                let context_window = codex_model_info_context_window(&model);
+                ModelInfo {
+                    id: ModelId::new(model.id.clone()),
+                    provider_id: self.id.clone(),
+                    name: model.display_name,
+                    context_window,
+                    max_output_tokens: 32_768,
+                }
             })
             .collect();
         Ok(models)
@@ -1060,5 +1103,59 @@ impl LlmProvider for CodexProvider {
             structured_output: false,
             system_prompt_style: SystemPromptStyle::SystemMessage,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_codex_provider_options_maps_reasoning_and_include() {
+        let mut body = json!({
+            "model": "gpt-5.3-codex",
+            "input": [],
+            "text": {
+                "verbosity": "medium"
+            }
+        });
+
+        CodexProvider::merge_codex_provider_options(
+            &mut body,
+            &json!({
+                "reasoningEffort": "high",
+                "reasoningSummary": "auto",
+                "include": ["reasoning.encrypted_content"],
+                "textVerbosity": "low"
+            }),
+        );
+
+        assert_eq!(body["reasoning"]["effort"], json!("high"));
+        assert_eq!(body["reasoning"]["summary"], json!("auto"));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["text"]["verbosity"], json!("low"));
+    }
+
+    #[test]
+    fn codex_model_info_context_window_uses_metadata_before_fallbacks() {
+        let metadata_model = CodexModelEntry {
+            id: "gpt-5.5".to_string(),
+            display_name: "GPT-5.5".to_string(),
+            description: String::new(),
+            context_window: Some(272_000),
+            max_context_window: None,
+            effective_context_window_percent: None,
+        };
+        assert_eq!(codex_model_info_context_window(&metadata_model), 272_000);
+
+        let fallback_model = CodexModelEntry {
+            id: "gpt-5.3-codex-spark".to_string(),
+            display_name: "GPT-5.3 Codex Spark".to_string(),
+            description: String::new(),
+            context_window: None,
+            max_context_window: None,
+            effective_context_window_percent: None,
+        };
+        assert_eq!(codex_model_info_context_window(&fallback_model), 128_000);
     }
 }

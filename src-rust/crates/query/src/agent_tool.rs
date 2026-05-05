@@ -358,6 +358,7 @@ impl Tool for AgentTool {
             temperature: None,
             tool_result_budget: 50_000,
             effort_level: None,
+            fast_mode: false,
             command_queue: None,
             skill_index: None,
             max_budget_usd: None,

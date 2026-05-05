@@ -43,9 +43,117 @@ use claurst_core::types::ToolDefinition;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use clap::{ArgAction, Parser, ValueEnum};
 use parking_lot::Mutex as ParkingMutex;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::{path::PathBuf, sync::Arc};
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
+
+fn session_blob_dir(session_id: &str) -> Option<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return None;
+    };
+
+    let safe_session_id: String = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(home.join(".claurst").join("blobs").join(safe_session_id))
+}
+
+fn materialize_paste_blobs(
+    input: &str,
+    paste_contents: HashMap<u32, String>,
+    session_id: &str,
+) -> String {
+    if paste_contents.is_empty() {
+        return input.to_string();
+    }
+
+    let Some(blob_dir) = session_blob_dir(session_id) else {
+        return input.to_string();
+    };
+
+    let mut rendered = input.to_string();
+    let mut replacements: Vec<(String, String)> = Vec::new();
+
+    for (id, content) in paste_contents {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        let short_hash = &hash[..12];
+        let path = blob_dir.join(format!("paste-{}-{}.txt", id, short_hash));
+
+        let write_result = std::fs::create_dir_all(&blob_dir)
+            .and_then(|_| std::fs::write(&path, content.as_bytes()));
+        let line_count = claurst_core::prompt_history::get_pasted_text_ref_num_lines(&content);
+        let placeholder = claurst_core::prompt_history::format_pasted_text_ref(id, line_count);
+        let replacement = match write_result {
+            Ok(()) => format!(
+                "{}\n[Blob #{}: {} bytes, {} line(s), saved at {}. Use the Read tool if you need the full pasted content.]",
+                placeholder,
+                id,
+                content.len(),
+                line_count,
+                path.display()
+            ),
+            Err(err) => format!(
+                "{}\n[Blob #{} capture failed: {}. Full pasted content was not inserted to avoid context bloat.]",
+                placeholder, id, err
+            ),
+        };
+        replacements.push((placeholder, replacement));
+    }
+
+    replacements.sort_by_key(|(placeholder, _)| std::cmp::Reverse(placeholder.len()));
+    for (placeholder, replacement) in replacements {
+        rendered = rendered.replace(&placeholder, &replacement);
+    }
+
+    rendered
+}
+
+fn materialize_image_blob(path: &std::path::Path, session_id: &str) -> PathBuf {
+    let Ok(bytes) = std::fs::read(path) else {
+        return path.to_path_buf();
+    };
+    let Some(blob_dir) = session_blob_dir(session_id) else {
+        return path.to_path_buf();
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = format!("{:x}", hasher.finalize());
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or("png");
+    let blob_path = blob_dir.join(format!("image-{}.{}", &hash[..12], ext));
+
+    match std::fs::create_dir_all(&blob_dir).and_then(|_| std::fs::write(&blob_path, bytes)) {
+        Ok(()) => blob_path,
+        Err(err) => {
+            warn!("failed to materialize pasted image blob: {}", err);
+            path.to_path_buf()
+        }
+    }
+}
+
+fn load_fast_mode_setting() -> bool {
+    let path = Settings::config_dir().join("ui-settings.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|value| value.get("fast_mode").and_then(|fast| fast.as_bool()))
+        .unwrap_or(false)
+}
 
 // ---------------------------------------------------------------------------
 // MCP tool wrapper: makes MCP server tools look like native cc-tools.
@@ -604,6 +712,37 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(InteractivePermissionHandler::with_manager(permission_manager.clone()))
     };
     let cost_tracker = CostTracker::new();
+
+    // Load plugins and register any plugin-provided MCP servers into the
+    // in-memory config (does not modify the settings file on disk).
+    let plugin_registry = claurst_plugins::load_plugins(&cwd, &[]).await;
+    {
+        let plugin_cmd_count = plugin_registry.all_command_defs().len();
+        let plugin_hook_count = plugin_registry
+            .build_hook_registry()
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>();
+        info!(
+            plugins = plugin_registry.enabled_count(),
+            commands = plugin_cmd_count,
+            hooks = plugin_hook_count,
+            "Plugins loaded"
+        );
+
+        // Register plugin MCP servers before constructing the MCP manager so they connect at startup.
+        let existing_names: std::collections::HashSet<String> = config
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        for mcp_server in plugin_registry.all_mcp_servers() {
+            if !existing_names.contains(&mcp_server.name) {
+                config.mcp_servers.push(mcp_server);
+            }
+        }
+    }
+
     // Use --session-id if provided, otherwise generate a fresh UUID.
     let session_id = cli
         .session_id_flag
@@ -650,37 +789,6 @@ async fn main() -> anyhow::Result<()> {
     // Wrap in Arc so the list can be shared by the main loop AND the cron scheduler.
     let tools = build_tools_with_mcp(mcp_manager_arc.clone());
 
-    // Load plugins and register any plugin-provided MCP servers into the
-    // in-memory config (does not modify the settings file on disk).
-    let plugin_registry = claurst_plugins::load_plugins(&cwd, &[]).await;
-    {
-        let plugin_cmd_count = plugin_registry.all_command_defs().len();
-        let plugin_hook_count = plugin_registry
-            .build_hook_registry()
-            .values()
-            .map(|v| v.len())
-            .sum::<usize>();
-        info!(
-            plugins = plugin_registry.enabled_count(),
-            commands = plugin_cmd_count,
-            hooks = plugin_hook_count,
-            "Plugins loaded"
-        );
-
-        // Register plugin MCP servers into the in-memory config so they are
-        // picked up by any subsequent MCP manager construction.
-        let existing_names: std::collections::HashSet<String> = config
-            .mcp_servers
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        for mcp_server in plugin_registry.all_mcp_servers() {
-            if !existing_names.contains(&mcp_server.name) {
-                config.mcp_servers.push(mcp_server);
-            }
-        }
-    }
-
     // Build model registry for dynamic model/provider resolution.
     // The registry is pre-populated with a hardcoded snapshot and enriched
     // from the models.dev cache if available.
@@ -688,6 +796,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build query config
     let mut query_config = claurst_query::QueryConfig::from_config_with_registry(&config, &model_registry);
+    query_config.fast_mode = load_fast_mode_setting();
     query_config.model_registry = Some(model_registry.clone());
     query_config.max_turns = cli.max_turns;
     query_config.system_prompt = Some(system_prompt);
@@ -1320,7 +1429,7 @@ async fn run_interactive(
         device_auth_dialog::DeviceAuthEvent,
     };
     use crossterm::event::{self, Event, KeyCode};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -1375,6 +1484,7 @@ async fn run_interactive(
     // Set up terminal
     let mut terminal = setup_terminal()?;
     let mut app = App::new(live_config.clone(), cost_tracker.clone());
+    app.fast_mode = base_query_config.fast_mode;
     // Sync initial effort level (from --effort flag or /effort command) to TUI indicator.
     if let Some(level) = base_query_config.effort_level {
         use claurst_tui::EffortLevel as TuiEL;
@@ -1618,6 +1728,7 @@ async fn run_interactive(
         })
     };
     cmd_ctx.mcp_auth_runner = Some(mcp_auth_runner.clone());
+    let mut ignore_enter_after_paste_until: Option<Instant> = None;
     'main: loop {
         app.frame_count = app.frame_count.wrapping_add(1);
         app.tick_rustle_pose();
@@ -1635,6 +1746,15 @@ async fn run_interactive(
                     // Only process Press to avoid double-registering input.
                     if key.kind != crossterm::event::KeyEventKind::Press {
                         continue;
+                    }
+
+                    if key.code == KeyCode::Enter {
+                        if let Some(until) = ignore_enter_after_paste_until {
+                            if Instant::now() <= until {
+                                ignore_enter_after_paste_until = None;
+                                continue;
+                            }
+                        }
                     }
 
                     // Ctrl+C: copy selected text if there's a selection, otherwise cancel/quit
@@ -1720,6 +1840,7 @@ async fn run_interactive(
 
                         // Check for slash command
                         if input.starts_with('/') {
+                            let _ = app.prompt_input.clear_paste_contents();
                             let (cmd_name, cmd_args) =
                                 claurst_tui::input::parse_slash_command(&input);
                             let cmd_name = cmd_name.to_string();
@@ -1734,13 +1855,13 @@ async fn run_interactive(
                             //   /model claude-haiku  → set model, don't open picker
                             //   /theme dark          → set theme, don't open picker
                             //   /resume <id>         → load session, don't open browser
-                            // Also skip TUI for /vim, /voice, /fast with explicit
+                            // Also skip TUI for /vim, /voice, /fast, /rtk with explicit
                             // on|off args so the blind-toggle doesn't misfire.
                             let skip_tui_for_args = !cmd_args.is_empty()
                                 && matches!(
                                     cmd_name.as_str(),
                                     "model" | "theme" | "resume" | "session"
-                                        | "vim" | "vi" | "voice" | "fast" | "speed"
+                                        | "vim" | "vi" | "voice" | "fast" | "speed" | "effort" | "rtk"
                                 );
                             let handled_by_tui = if skip_tui_for_args {
                                 false
@@ -1940,7 +2061,7 @@ async fn run_interactive(
                                     // Suppress text output when TUI already opened an
                                     // overlay for this command (e.g. /stats opens dialog
                                     // AND would push a text message — drop the text).
-                                    if !handled_by_tui {
+                                    if !handled_by_tui && !(cmd_name == "effort" && !cmd_args.is_empty()) {
                                         app.push_message(
                                             claurst_core::types::Message::assistant(msg),
                                         );
@@ -1957,10 +2078,11 @@ async fn run_interactive(
                                         app.set_model(model.clone());
                                     }
                                     // Sync fast_mode visual indicator.
-                                    app.fast_mode = applied_cfg.model
-                                        .as_deref()
-                                        .map(|m| m.contains("haiku"))
-                                        .unwrap_or(false);
+                                    if matches!(cmd_name.as_str(), "fast" | "speed") {
+                                        app.fast_mode = load_fast_mode_setting();
+                                    } else {
+                                        app.fast_mode = load_fast_mode_setting();
+                                    }
                                     // Sync plan_mode visual indicator.
                                     app.plan_mode = matches!(
                                         applied_cfg.permission_mode,
@@ -1981,10 +2103,11 @@ async fn run_interactive(
                                     // Sync model/provider + fast_mode visual indicator.
                                     if let Some(ref model) = applied_cfg.model {
                                         app.set_model(model.clone());
-                                        app.fast_mode = model.contains("haiku");
+                                    }
+                                    if matches!(cmd_name.as_str(), "fast" | "speed") {
+                                        app.fast_mode = load_fast_mode_setting();
                                     } else {
-                                        // model reset to None means fast mode off.
-                                        app.fast_mode = false;
+                                        app.fast_mode = load_fast_mode_setting();
                                     }
                                     app.config = applied_cfg.clone();
                                     session.model = claurst_api::effective_model_for_config(
@@ -2033,8 +2156,12 @@ async fn run_interactive(
                                 && cmd_name == "effort"
                                 && !cmd_args.is_empty()
                             {
-                                if let Some(level) =
-                                    claurst_core::effort::EffortLevel::from_str(&cmd_args)
+                                let effort_arg = if cmd_args.trim().eq_ignore_ascii_case("normal") {
+                                    "medium"
+                                } else {
+                                    cmd_args.trim()
+                                };
+                                if let Some(level) = claurst_core::effort::EffortLevel::from_str(effort_arg)
                                 {
                                     current_effort = Some(level);
                                     app.effort_level = match level {
@@ -2100,26 +2227,36 @@ async fn run_interactive(
                             .await;
                         }
 
-                        // Regular user message (with optional image attachments)
+                        // Regular user message (with optional blob-backed pasted content
+                        // and image attachments). Large text paste bodies are persisted as
+                        // blobs and replaced with compact references so they do not inflate
+                        // conversation context unless the model explicitly reads them.
+                        let paste_blobs = app.prompt_input.clear_paste_contents();
+                        let input_for_model =
+                            materialize_paste_blobs(&input, paste_blobs, &tool_ctx.session_id);
                         let pending_imgs = app.prompt_input.clear_images();
                         let user_msg = if pending_imgs.is_empty() {
-                            claurst_core::types::Message::user(input.clone())
+                            claurst_core::types::Message::user(input_for_model.clone())
                         } else {
                             let mut blocks: Vec<claurst_core::types::ContentBlock> = pending_imgs
                                 .iter()
-                                .filter_map(|img| {
-                                    claurst_tui::image_paste::encode_image_base64(&img.path)
-                                        .map(|b64| claurst_core::types::ContentBlock::Image {
-                                            source: claurst_core::types::ImageSource {
-                                                source_type: "base64".to_string(),
-                                                media_type: Some("image/png".to_string()),
-                                                data: Some(b64),
-                                                url: None,
-                                            },
-                                        })
+                                .map(|img| {
+                                    let blob_path =
+                                        materialize_image_blob(&img.path, &tool_ctx.session_id);
+                                    claurst_core::types::ContentBlock::Image {
+                                        source: claurst_core::types::ImageSource {
+                                            source_type: "file".to_string(),
+                                            media_type: Some("image/png".to_string()),
+                                            data: None,
+                                            url: None,
+                                            path: Some(blob_path.to_string_lossy().to_string()),
+                                        },
+                                    }
                                 })
                                 .collect();
-                            blocks.push(claurst_core::types::ContentBlock::Text { text: input.clone() });
+                            blocks.push(claurst_core::types::ContentBlock::Text {
+                                text: input_for_model.clone(),
+                            });
                             claurst_core::types::Message::user_blocks(blocks)
                         };
                         messages.push(user_msg.clone());
@@ -2158,6 +2295,7 @@ async fn run_interactive(
                         qcfg.output_style = cmd_ctx.config.effective_output_style();
                         qcfg.output_style_prompt = cmd_ctx.config.resolve_output_style_prompt();
                         qcfg.working_directory = Some(tool_ctx.working_dir.display().to_string());
+                        qcfg.fast_mode = app.fast_mode;
                         // Apply active effort level (set via /effort command).
                         if let Some(level) = current_effort {
                             qcfg.effort_level = Some(level);
@@ -2304,6 +2442,17 @@ async fn run_interactive(
                         messages = app.messages.clone();
                         session.messages = messages.clone();
                         session.updated_at = chrono::Utc::now();
+                    }
+                }
+                Event::Paste(data) => {
+                    if !app.is_streaming
+                        && app.permission_request.is_none()
+                        && !app.history_search_overlay.visible
+                        && app.history_search.is_none()
+                    {
+                        app.paste_text_into_prompt(&data);
+                        ignore_enter_after_paste_until =
+                            Some(Instant::now() + Duration::from_millis(250));
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -3499,4 +3648,3 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
         None => serde_json::Value::Null,
     }
 }
-

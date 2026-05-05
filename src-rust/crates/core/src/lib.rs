@@ -283,6 +283,30 @@ pub mod types {
         pub data: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub url: Option<String>,
+        /// Local file-backed image blob.
+        ///
+        /// This keeps pasted images out of persisted conversation context while
+        /// still allowing provider adapters to materialize base64 at the HTTP
+        /// boundary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub path: Option<String>,
+    }
+
+    impl ImageSource {
+        /// Return inline base64 image data, loading it lazily from `path` when
+        /// this source is file-backed.
+        pub fn base64_data(&self) -> Option<std::borrow::Cow<'_, str>> {
+            if let Some(data) = &self.data {
+                return Some(std::borrow::Cow::Borrowed(data.as_str()));
+            }
+
+            let path = self.path.as_ref()?;
+            let bytes = std::fs::read(path).ok()?;
+            Some(std::borrow::Cow::Owned(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                bytes,
+            )))
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -884,10 +908,53 @@ pub mod config {
         }
     }
 
+    // ---- RTK -------------------------------------------------------------
+
+    fn default_rtk_binary() -> String {
+        "rtk".to_string()
+    }
+
+    fn default_rtk_rewrite_timeout_ms() -> u64 {
+        2_000
+    }
+
+    /// Native RTK (Rust Token Killer) integration settings.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(default, rename_all = "camelCase")]
+    pub struct RtkConfig {
+        pub enabled: bool,
+        pub mode: RtkMode,
+        pub binary: String,
+        pub exclude_commands: Vec<String>,
+        pub rewrite_timeout_ms: u64,
+    }
+
+    impl Default for RtkConfig {
+        fn default() -> Self {
+            Self {
+                enabled: true,
+                mode: RtkMode::Rewrite,
+                binary: default_rtk_binary(),
+                exclude_commands: Vec::new(),
+                rewrite_timeout_ms: default_rtk_rewrite_timeout_ms(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+    #[serde(rename_all = "kebab-case")]
+    pub enum RtkMode {
+        Off,
+        Suggest,
+        #[default]
+        Rewrite,
+    }
+
     // ---- Config ----------------------------------------------------------
 
     /// Top-level configuration values, merged from CLI args + settings file + env.
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    #[serde(default)]
     pub struct Config {
         pub api_key: Option<String>,
         pub model: Option<String>,
@@ -937,6 +1004,8 @@ pub mod config {
         /// Skill-discovery configuration (copied from Settings on load).
         #[serde(default)]
         pub skills: SkillsConfig,
+        #[serde(default)]
+        pub rtk: RtkConfig,
         /// Managed agent (manager-executor) configuration.
         #[serde(default)]
         pub managed_agents: Option<ManagedAgentConfig>,
@@ -1171,6 +1240,7 @@ pub mod config {
                 Some("azure") => "gpt-4o",
                 Some("amazon-bedrock") => "anthropic.claude-sonnet-4-6-v1",
                 Some("venice") => "llama-3.3-70b",
+                Some("codex") | Some("openai-codex") => crate::codex_oauth::DEFAULT_CODEX_MODEL,
                 _ => crate::constants::DEFAULT_MODEL, // Anthropic default
             }
         }
@@ -1553,6 +1623,11 @@ pub mod config {
                     for u in over.config.skills.urls { if !urls.contains(&u) { urls.push(u); } }
                     SkillsConfig { paths, urls }
                 },
+                rtk: if over.config.rtk != RtkConfig::default() {
+                    over.config.rtk
+                } else {
+                    base.config.rtk
+                },
                 managed_agents: over.config.managed_agents.or(base.config.managed_agents),
             };
             Self {
@@ -1693,6 +1768,10 @@ pub mod constants {
     pub const TOOL_NAME_FILE_WRITE: &str = "Write";
     pub const TOOL_NAME_GLOB: &str = "Glob";
     pub const TOOL_NAME_GREP: &str = "Grep";
+    pub const TOOL_NAME_FFFQ: &str = "Fffq";
+    pub const TOOL_NAME_GRAPHIFYQ: &str = "Graphifyq";
+    pub const TOOL_NAME_OMX_MEMORY: &str = "OmxMemory";
+    pub const TOOL_NAME_RTK: &str = "Rtk";
     pub const TOOL_NAME_AGENT: &str = "Agent";
     pub const TOOL_NAME_WEB_FETCH: &str = "WebFetch";
     pub const TOOL_NAME_WEB_SEARCH: &str = "WebSearch";
@@ -3788,6 +3867,31 @@ mod tests {
     // ---- Config tests -------------------------------------------------------
 
     #[test]
+    fn test_settings_config_mcp_server_env_deserializes_with_defaults() {
+        let settings: crate::config::Settings = serde_json::from_str(
+            r#"{
+                "config": {
+                    "mcp_servers": [
+                        {
+                            "name": "mcp-router",
+                            "command": "pnpx",
+                            "args": ["@mcp_router/cli@latest", "connect"],
+                            "env": { "MCPR_TOKEN": "test-token" },
+                            "type": "stdio"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("parse minimal mcp server config");
+
+        let config = settings.effective_config();
+        let server = config.mcp_servers.first().expect("mcp server loaded");
+        assert_eq!(server.name, "mcp-router");
+        assert_eq!(server.env.get("MCPR_TOKEN").map(String::as_str), Some("test-token"));
+    }
+
+    #[test]
     fn test_config_effective_model_default() {
         let cfg = crate::config::Config::default();
         assert_eq!(cfg.effective_model(), crate::constants::DEFAULT_MODEL);
@@ -3798,6 +3902,13 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.model = Some("claude-haiku-4-5-20251001".to_string());
         assert_eq!(cfg.effective_model(), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_config_effective_model_openai_codex_default() {
+        let mut cfg = crate::config::Config::default();
+        cfg.provider = Some("openai-codex".to_string());
+        assert_eq!(cfg.effective_model(), crate::codex_oauth::DEFAULT_CODEX_MODEL);
     }
 
     #[test]
@@ -4242,5 +4353,46 @@ mod tests {
             assert!(preset.executor_model.contains('/'),
                 "Preset {} executor_model must be provider/model", preset.name);
         }
+    }
+
+    #[test]
+    fn image_source_base64_data_reads_path() {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        std::io::Write::write_all(&mut file, b"image bytes").expect("write image");
+        let source = ImageSource {
+            source_type: "file".to_string(),
+            media_type: Some("image/png".to_string()),
+            data: None,
+            url: None,
+            path: Some(file.path().to_string_lossy().to_string()),
+        };
+
+        assert_eq!(source.base64_data().as_deref(), Some("aW1hZ2UgYnl0ZXM="));
+    }
+
+    #[test]
+    fn image_source_base64_data_prefers_inline_data() {
+        let source = ImageSource {
+            source_type: "base64".to_string(),
+            media_type: Some("image/png".to_string()),
+            data: Some("inline".to_string()),
+            url: None,
+            path: Some("/definitely/missing.png".to_string()),
+        };
+
+        assert_eq!(source.base64_data().as_deref(), Some("inline"));
+    }
+
+    #[test]
+    fn image_source_base64_data_missing_path_is_none() {
+        let source = ImageSource {
+            source_type: "file".to_string(),
+            media_type: Some("image/png".to_string()),
+            data: None,
+            url: None,
+            path: Some("/definitely/missing.png".to_string()),
+        };
+
+        assert!(source.base64_data().is_none());
     }
 }

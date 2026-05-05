@@ -116,14 +116,6 @@ fn stripped_model_for_provider<'a>(provider_id: &str, model_id: &'a str) -> &'a 
         .unwrap_or(model_id)
 }
 
-fn canonical_model_for_provider(provider_id: &str, model_id: &str) -> String {
-    if provider_id == "anthropic" || model_id.contains('/') {
-        model_id.to_string()
-    } else {
-        format!("{provider_id}/{model_id}")
-    }
-}
-
 fn provider_lookup_ids(provider_id: &str) -> Vec<&str> {
     match provider_id {
         "togetherai" | "together-ai" => vec!["togetherai", "together-ai"],
@@ -135,6 +127,7 @@ fn provider_lookup_ids(provider_id: &str) -> Vec<&str> {
         "zhipu" | "zhipuai" => vec!["zhipu", "zhipuai"],
         "vultr" | "vultr-ai" => vec!["vultr", "vultr-ai"],
         "google" | "google-vertex" => vec!["google", "google-vertex"],
+        "codex" | "openai-codex" => vec!["openai-codex", "codex"],
         _ => vec![provider_id],
     }
 }
@@ -250,6 +243,7 @@ pub struct SecurityReviewCommand;
 pub struct TerminalSetupCommand;
 pub struct ExtraUsageCommand;
 pub struct FastCommand;
+pub struct RtkCommand;
 pub struct ThinkBackCommand;
 pub struct ThinkBackPlayCommand;
 pub struct FeedbackCommand;
@@ -1968,8 +1962,13 @@ impl SlashCommand for DoctorCommand {
             ..Default::default()
         };
         let provider_registry = claurst_api::ProviderRegistry::from_config(&ctx.config, client_config);
-        let provider_id = claurst_core::ProviderId::new(ctx.config.selected_provider_id());
-        match provider_registry.get(&provider_id) {
+        let provider = provider_lookup_ids(ctx.config.selected_provider_id())
+            .into_iter()
+            .find_map(|lookup_id| {
+                let provider_id = claurst_core::ProviderId::new(lookup_id);
+                provider_registry.get(&provider_id).cloned()
+            });
+        match provider.as_ref() {
             Some(provider) => match provider.health_check().await {
                 Ok(claurst_api::provider_types::ProviderStatus::Healthy) => {
                     lines.push(format!("  ✓ {} is healthy", provider.name()));
@@ -4372,36 +4371,33 @@ impl SlashCommand for RenameCommand {
 #[async_trait]
 impl SlashCommand for EffortCommand {
     fn name(&self) -> &str { "effort" }
-    fn description(&self) -> &str { "Set the model's thinking effort (low | normal | high)" }
+    fn description(&self) -> &str { "Set reasoning effort (low | medium | high | max)" }
     fn help(&self) -> &str {
-        "Usage: /effort [low|normal|high]\n\
+        "Usage: /effort [low|medium|normal|high|max]\n\
          Sets how much computation the model uses for reasoning.\n\
-         'high' enables extended thinking with a larger budget."
+         `normal` is accepted as an alias for `medium`."
     }
 
-    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
-        match args.trim() {
-            "" => CommandResult::Message(format!(
-                "Current effort: normal\nUse /effort [low|normal|high] to change."
-            )),
-            "low" => {
-                // Low effort: smaller max_tokens
-                ctx.config.max_tokens = Some(4096);
-                CommandResult::ConfigChange(ctx.config.clone())
+    async fn execute(&self, args: &str, _ctx: &mut CommandContext) -> CommandResult {
+        let normalized = match args.trim().to_ascii_lowercase().as_str() {
+            "" => {
+                return CommandResult::Message(
+                    "Current effort: normal\nUse /effort [low|medium|high|max] to change.".to_string(),
+                )
             }
-            "normal" => {
-                ctx.config.max_tokens = None; // use default
-                CommandResult::ConfigChange(ctx.config.clone())
+            "low" => "low",
+            "medium" | "normal" => "medium",
+            "high" => "high",
+            "max" => "max",
+            other => {
+                return CommandResult::Error(format!(
+                    "Unknown effort level '{}'. Use: low | medium | high | max",
+                    other
+                ))
             }
-            "high" => {
-                ctx.config.max_tokens = Some(32768);
-                CommandResult::ConfigChange(ctx.config.clone())
-            }
-            other => CommandResult::Error(format!(
-                "Unknown effort level '{}'. Use: low | normal | high",
-                other
-            )),
-        }
+        };
+
+        CommandResult::Message(format!("Effort set to {}.", normalized))
     }
 }
 
@@ -6202,11 +6198,12 @@ impl SlashCommand for InstallSlackAppCommand {
 impl SlashCommand for FastCommand {
     fn name(&self) -> &str { "fast" }
     fn aliases(&self) -> Vec<&str> { vec!["speed"] }
-    fn description(&self) -> &str { "Toggle fast mode (uses a faster/cheaper model)" }
+    fn description(&self) -> &str { "Toggle fast transport mode without changing model" }
     fn help(&self) -> &str {
         "Usage: /fast [on|off]\n\n\
-         Fast mode switches to the active provider's smaller, faster model\n\
-         for quick responses. Toggle without argument to switch.\n\
+         Fast mode keeps the selected model unchanged. For Codex OAuth requests it\n\
+         asks for priority service tier so responses can arrive faster while using\n\
+         the higher/faster limits pool. Toggle without argument to switch.\n\
          The setting is persisted to ~/.claurst/ui-settings.json."
     }
 
@@ -6215,8 +6212,8 @@ impl SlashCommand for FastCommand {
         let currently_on = current.fast_mode.unwrap_or(false);
 
         let enable = match args.trim() {
-            "on" | "enable" | "true" | "1" => true,
-            "off" | "disable" | "false" | "0" => false,
+            "on" | "enable" | "enabled" | "true" | "1" => true,
+            "off" | "disable" | "disabled" | "false" | "0" => false,
             "" => !currently_on,
             other => {
                 return CommandResult::Error(format!(
@@ -6230,42 +6227,124 @@ impl SlashCommand for FastCommand {
             return CommandResult::Error(format!("Failed to save setting: {}", e));
         }
 
-        let provider_id = ctx.config.selected_provider_id();
-        let fast_model = resolve_fast_model_id(&ctx.config);
-        let normal_model = stripped_model_for_provider(
-            provider_id,
-            ctx.config.effective_model(),
-        )
-        .to_string();
-
-        if enable {
-            let mut new_config = ctx.config.clone();
-            new_config.model = Some(canonical_model_for_provider(provider_id, &fast_model));
-            CommandResult::ConfigChangeMessage(
-                new_config,
-                format!(
-                    "Fast mode ON. Using {} for quicker, cheaper responses.\n\
-                     Use /fast off to return to {}.",
-                    fast_model, normal_model
-                ),
-            )
+        let model = ctx.config.effective_model().to_string();
+        let state = if enable { "ON" } else { "OFF" };
+        let detail = if enable {
+            "Codex OAuth requests will use priority service tier when supported."
         } else {
-            let mut new_config = ctx.config.clone();
-            // Restore default / saved model
-            new_config.model = None;
-            let restored_model = stripped_model_for_provider(
-                provider_id,
-                new_config.effective_model(),
-            )
-            .to_string();
-            CommandResult::ConfigChangeMessage(
-                new_config,
-                format!(
-                    "Fast mode OFF. Restored to default model ({}).",
-                    restored_model
-                ),
-            )
+            "Codex OAuth requests will use the default service tier."
+        };
+
+        CommandResult::ConfigChangeMessage(
+            ctx.config.clone(),
+            format!(
+                "Fast mode {state}. Model unchanged: {model}.\n{detail}",
+            ),
+        )
+    }
+}
+
+// ---- /rtk ---------------------------------------------------------------
+
+#[async_trait]
+impl SlashCommand for RtkCommand {
+    fn name(&self) -> &str { "rtk" }
+    fn description(&self) -> &str { "Configure RTK command rewriting integration" }
+    fn help(&self) -> &str {
+        "Usage: /rtk [status|on|off|suggest|rewrite|binary <path>|timeout <ms>|exclude add <prefix>|exclude remove <prefix>|exclude list]\n\n\
+         Configures the native RTK integration (https://github.com/rtk-ai/rtk).\n\
+         suggest = show rewrites, rewrite = apply rewrites before tool execution."
+    }
+
+    async fn execute(&self, args: &str, ctx: &mut CommandContext) -> CommandResult {
+        use claurst_core::config::RtkMode;
+
+        let mut next = ctx.config.rtk.clone();
+        let args = args.trim();
+        let parts: Vec<&str> = args.split_whitespace().collect();
+
+        match parts.as_slice() {
+            [] | ["status"] => {
+                return CommandResult::Message(format!(
+                    "RTK\n  enabled: {}\n  mode: {:?}\n  binary: {}\n  timeout: {} ms\n  exclude: {}",
+                    next.enabled,
+                    next.mode,
+                    next.binary,
+                    next.rewrite_timeout_ms,
+                    if next.exclude_commands.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        next.exclude_commands.join(", ")
+                    }
+                ));
+            }
+            ["on" | "enable" | "enabled"] => {
+                next.enabled = true;
+                if matches!(next.mode, RtkMode::Off) {
+                    next.mode = RtkMode::Rewrite;
+                }
+            }
+            ["off" | "disable" | "disabled"] => {
+                next.enabled = false;
+                next.mode = RtkMode::Off;
+            }
+            ["suggest"] => {
+                next.enabled = true;
+                next.mode = RtkMode::Suggest;
+            }
+            ["rewrite"] => {
+                next.enabled = true;
+                next.mode = RtkMode::Rewrite;
+            }
+            ["binary", path] => {
+                next.binary = (*path).to_string();
+            }
+            ["timeout", ms] => {
+                let parsed = ms.parse::<u64>().map_err(|_| {
+                    CommandResult::Error("Timeout must be an integer number of milliseconds.".to_string())
+                });
+                match parsed {
+                    Ok(value) => next.rewrite_timeout_ms = value.clamp(100, 60_000),
+                    Err(err) => return err,
+                }
+            }
+            ["exclude", "list"] => {
+                return CommandResult::Message(format!(
+                    "RTK excluded command prefixes: {}",
+                    if next.exclude_commands.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        next.exclude_commands.join(", ")
+                    }
+                ));
+            }
+            ["exclude", "add", prefix] => {
+                let value = (*prefix).to_string();
+                if !next.exclude_commands.iter().any(|existing| existing == &value) {
+                    next.exclude_commands.push(value);
+                }
+            }
+            ["exclude", "remove", prefix] => {
+                next.exclude_commands.retain(|existing| existing != prefix);
+            }
+            _ => {
+                return CommandResult::Error(self.help().to_string());
+            }
         }
+
+        let mut new_config = ctx.config.clone();
+        new_config.rtk = next.clone();
+        if let Err(err) = save_settings_mutation(|settings| settings.config.rtk = next.clone()) {
+            return CommandResult::Error(format!("Failed to save RTK settings: {}", err));
+        }
+
+        CommandResult::ConfigChangeMessage(
+            new_config,
+            format!(
+                "RTK updated: enabled={}, mode={:?}, binary={}, timeout={} ms",
+                next.enabled, next.mode, next.binary, next.rewrite_timeout_ms
+            ),
+        )
     }
 }
 
@@ -8167,6 +8246,7 @@ pub fn all_commands() -> Vec<Box<dyn SlashCommand>> {
         Box::new(TerminalSetupCommand),
         Box::new(ExtraUsageCommand),
         Box::new(FastCommand),
+        Box::new(RtkCommand),
         Box::new(ThinkBackCommand),
         Box::new(ThinkBackPlayCommand),
         Box::new(FeedbackCommand),
@@ -8572,5 +8652,30 @@ mod tests {
                 "second value".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_effort_command_accepts_medium_normal_and_max() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("effort").unwrap();
+
+        for arg in ["medium", "normal", "max"] {
+            let result = cmd.execute(arg, &mut ctx).await;
+            assert!(matches!(result, CommandResult::Message(_)), "arg {arg} failed");
+        }
+    }
+
+    #[test]
+    fn test_codex_provider_lookup_accepts_alias() {
+        assert_eq!(provider_lookup_ids("openai-codex"), vec!["openai-codex", "codex"]);
+        assert_eq!(provider_lookup_ids("codex"), vec!["openai-codex", "codex"]);
+    }
+
+    #[tokio::test]
+    async fn test_rtk_status_command_returns_message() {
+        let mut ctx = make_ctx();
+        let cmd = find_command("rtk").unwrap();
+        let result = cmd.execute("status", &mut ctx).await;
+        assert!(matches!(result, CommandResult::Message(message) if message.contains("RTK")));
     }
 }

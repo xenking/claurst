@@ -484,7 +484,17 @@ const TOOL_USE_GUIDELINES: &str = r#"
 ## Tool use guidelines
 
 - Use dedicated tools (Read, Edit, Glob, Grep) instead of bash equivalents
-- For searches, prefer Grep over `grep`; prefer Glob over `find`
+- For repository inspection, use Fffq before Grep/Glob/Bash for file discovery,
+  exact text lookup, and symbol lookup
+- Use Graphifyq for architecture, data-flow, dependency, and cross-file
+  relationship questions after Fffq
+- Use OmxMemory to retrieve durable project/user memory when prior context may
+  materially change the answer, and to write durable notes when explicitly
+  asked or when preserving a confirmed decision/preference/procedure is useful
+- For searches, prefer Fffq/Grep over `grep`; prefer Fffq/Glob over `find`
+- Native RTK may compact noisy Bash output for commands like git, gh, cargo,
+  tests, builds, Docker, and package managers. Do not use RTK as a replacement
+  for Fffq/Graphifyq/OmxMemory.
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits
 - Bash commands timeout after 2 minutes; use background mode for long operations
