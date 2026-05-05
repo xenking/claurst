@@ -27,6 +27,32 @@ struct CliToolInput {
     timeout_ms: u64,
     #[serde(default = "default_max_output_chars")]
     max_output_chars: usize,
+    #[serde(default)]
+    db: Option<String>,
+    #[serde(default)]
+    embedder: Option<String>,
+    #[serde(default)]
+    dimension: Option<u64>,
+    #[serde(default)]
+    model2vec_model: Option<String>,
+    #[serde(default)]
+    project_path: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    importance: Option<f64>,
+    #[serde(default)]
+    memory_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -139,6 +165,103 @@ fn graphifyq_args(params: &CliToolInput) -> Result<Vec<String>, String> {
             .ok_or_else(|| "question is required for graphifyq query".to_string()),
         other => Err(format!("unsupported graphifyq action: {other}")),
     }
+}
+
+fn push_omx_memory_global_args(args: &mut Vec<String>, params: &CliToolInput) {
+    if let Some(db) = &params.db {
+        args.extend(["--db".to_string(), db.clone()]);
+    }
+    if let Some(embedder) = &params.embedder {
+        args.extend(["--embedder".to_string(), embedder.clone()]);
+    }
+    if let Some(dimension) = params.dimension {
+        args.extend(["--dimension".to_string(), dimension.to_string()]);
+    }
+    if let Some(model) = &params.model2vec_model {
+        args.extend(["--model2vec-model".to_string(), model.clone()]);
+    }
+}
+
+fn omx_memory_args(params: &CliToolInput) -> Result<Vec<String>, String> {
+    if !params.args.is_empty() {
+        return Ok(params.args.clone());
+    }
+
+    let mut args = Vec::new();
+    push_omx_memory_global_args(&mut args, params);
+
+    match params.action.as_deref().unwrap_or("retrieve") {
+        "retrieve" => {
+            let query = params
+                .query
+                .as_ref()
+                .ok_or_else(|| "query is required for omx-memory retrieve".to_string())?;
+            args.extend(["retrieve".to_string(), query.clone()]);
+            if let Some(project_path) = &params.project_path {
+                args.extend(["--project-path".to_string(), project_path.clone()]);
+            }
+            if let Some(limit) = params.limit {
+                args.extend(["--limit".to_string(), limit.to_string()]);
+            }
+            Ok(args)
+        }
+        "status" => {
+            args.push("status".to_string());
+            Ok(args)
+        }
+        "explain" => {
+            let memory_id = params
+                .memory_id
+                .as_ref()
+                .or(params.query.as_ref())
+                .ok_or_else(|| "memory_id is required for omx-memory explain".to_string())?;
+            args.extend(["explain".to_string(), memory_id.clone()]);
+            Ok(args)
+        }
+        "note" => {
+            let title = params
+                .title
+                .as_ref()
+                .ok_or_else(|| "title is required for omx-memory note".to_string())?;
+            let body = params
+                .body
+                .as_ref()
+                .ok_or_else(|| "body is required for omx-memory note".to_string())?;
+            args.extend(["note".to_string(), title.clone(), body.clone()]);
+            if let Some(project_path) = &params.project_path {
+                args.extend(["--project-path".to_string(), project_path.clone()]);
+            }
+            for tag in &params.tags {
+                args.extend(["--tag".to_string(), tag.clone()]);
+            }
+            if let Some(importance) = params.importance {
+                args.extend(["--importance".to_string(), importance.to_string()]);
+            }
+            Ok(args)
+        }
+        "ingest-transcript" | "ingest_transcript" => {
+            let path = params
+                .path
+                .as_ref()
+                .ok_or_else(|| "path is required for omx-memory ingest-transcript".to_string())?;
+            let agent = params.agent.as_deref().unwrap_or("codex");
+            args.push("ingest-transcript".to_string());
+            args.extend(["--agent".to_string(), agent.to_string()]);
+            if let Some(project_path) = &params.project_path {
+                args.extend(["--project-path".to_string(), project_path.clone()]);
+            }
+            args.push(path.clone());
+            Ok(args)
+        }
+        other => Err(format!("unsupported omx-memory action: {other}")),
+    }
+}
+
+fn omx_memory_action_is_read_only(params: &CliToolInput) -> bool {
+    matches!(
+        params.action.as_deref().unwrap_or("retrieve"),
+        "retrieve" | "status" | "explain"
+    )
 }
 
 pub struct FffqTool;
@@ -257,6 +380,77 @@ impl Tool for GraphifyqTool {
     }
 }
 
+pub struct OmxMemoryTool;
+
+#[async_trait]
+impl Tool for OmxMemoryTool {
+    fn name(&self) -> &str {
+        claurst_core::constants::TOOL_NAME_OMX_MEMORY
+    }
+
+    fn description(&self) -> &str {
+        "Use omx-memory for durable project/user memory. Actions: retrieve, status, explain, note, ingest-transcript. Prefer retrieve before answering when prior context may materially help."
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["retrieve", "status", "explain", "note", "ingest-transcript", "ingest_transcript"], "description": "omx-memory action; defaults to retrieve"},
+                "query": {"type": "string", "description": "query for retrieve, or alias for memory_id in explain"},
+                "memory_id": {"type": "string", "description": "memory ID for explain"},
+                "title": {"type": "string", "description": "title for note"},
+                "body": {"type": "string", "description": "body for note"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "tags for note"},
+                "importance": {"type": "number", "description": "importance for note; default handled by omx-memory"},
+                "path": {"type": "string", "description": "transcript path for ingest-transcript"},
+                "agent": {"type": "string", "enum": ["codex", "claude"], "description": "transcript agent for ingest-transcript; defaults to codex"},
+                "project_path": {"type": "string", "description": "project path filter/metadata for retrieve, note, or ingest-transcript"},
+                "limit": {"type": "number", "description": "retrieve limit; default handled by omx-memory"},
+                "db": {"type": "string", "description": "optional omx-memory database path; defaults to omx-memory CLI default"},
+                "embedder": {"type": "string", "enum": ["hash", "model2-vec"], "description": "optional embedder provider"},
+                "dimension": {"type": "number", "description": "hash embedder dimension"},
+                "model2vec_model": {"type": "string", "description": "Model2Vec model ID or local model directory"},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "raw omx-memory arguments; overrides structured fields"},
+                "timeout_ms": {"type": "number", "description": "timeout in milliseconds; default 30000"},
+                "max_output_chars": {"type": "number", "description": "maximum returned characters; default 60000"}
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let params: CliToolInput = match serde_json::from_value(input) {
+            Ok(params) => params,
+            Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
+        };
+        let is_read_only = omx_memory_action_is_read_only(&params);
+        if let Err(e) = ctx.check_permission_for_path(
+            self.name(),
+            "Access durable memory with omx-memory",
+            ctx.working_dir.clone(),
+            is_read_only,
+        ) {
+            return ToolResult::error(e.to_string());
+        }
+        let args = match omx_memory_args(&params) {
+            Ok(args) => args,
+            Err(e) => return ToolResult::error(e),
+        };
+        run_cli(
+            "omx-memory",
+            &args,
+            ctx,
+            params.timeout_ms,
+            params.max_output_chars,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +465,19 @@ mod tests {
             args: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
+            db: None,
+            embedder: None,
+            dimension: None,
+            model2vec_model: None,
+            project_path: None,
+            limit: None,
+            title: None,
+            body: None,
+            tags: vec![],
+            importance: None,
+            memory_id: None,
+            path: None,
+            agent: None,
         };
         assert_eq!(fffq_args(&input).unwrap(), vec!["find", "codex"]);
     }
@@ -285,10 +492,144 @@ mod tests {
             args: vec![],
             timeout_ms: DEFAULT_TIMEOUT_MS,
             max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
+            db: None,
+            embedder: None,
+            dimension: None,
+            model2vec_model: None,
+            project_path: None,
+            limit: None,
+            title: None,
+            body: None,
+            tags: vec![],
+            importance: None,
+            memory_id: None,
+            path: None,
+            agent: None,
         };
         assert_eq!(
             graphifyq_args(&input).unwrap(),
             vec!["query", "how are tools wired?"]
         );
+    }
+
+    #[test]
+    fn omx_memory_retrieve_args_include_global_and_project_options() {
+        let input = CliToolInput {
+            action: Some("retrieve".to_string()),
+            query: Some("codex oauth".to_string()),
+            question: None,
+            queries: vec![],
+            args: vec![],
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
+            db: Some(".omx/test.sqlite".to_string()),
+            embedder: Some("model2-vec".to_string()),
+            dimension: None,
+            model2vec_model: Some("minishlab/potion-base-8M".to_string()),
+            project_path: Some("/workspace/claurst".to_string()),
+            limit: Some(3),
+            title: None,
+            body: None,
+            tags: vec![],
+            importance: None,
+            memory_id: None,
+            path: None,
+            agent: None,
+        };
+
+        assert_eq!(
+            omx_memory_args(&input).unwrap(),
+            vec![
+                "--db",
+                ".omx/test.sqlite",
+                "--embedder",
+                "model2-vec",
+                "--model2vec-model",
+                "minishlab/potion-base-8M",
+                "retrieve",
+                "codex oauth",
+                "--project-path",
+                "/workspace/claurst",
+                "--limit",
+                "3"
+            ]
+        );
+        assert!(omx_memory_action_is_read_only(&input));
+    }
+
+    #[test]
+    fn omx_memory_note_args_are_write_action() {
+        let input = CliToolInput {
+            action: Some("note".to_string()),
+            query: None,
+            question: None,
+            queries: vec![],
+            args: vec![],
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
+            db: None,
+            embedder: None,
+            dimension: None,
+            model2vec_model: None,
+            project_path: Some("/workspace/claurst".to_string()),
+            limit: None,
+            title: Some("Decision".to_string()),
+            body: Some("Use native OmxMemory tool.".to_string()),
+            tags: vec!["claurst".to_string(), "memory".to_string()],
+            importance: Some(0.9),
+            memory_id: None,
+            path: None,
+            agent: None,
+        };
+
+        assert_eq!(
+            omx_memory_args(&input).unwrap(),
+            vec![
+                "note",
+                "Decision",
+                "Use native OmxMemory tool.",
+                "--project-path",
+                "/workspace/claurst",
+                "--tag",
+                "claurst",
+                "--tag",
+                "memory",
+                "--importance",
+                "0.9"
+            ]
+        );
+        assert!(!omx_memory_action_is_read_only(&input));
+    }
+
+    #[test]
+    fn omx_memory_ingest_args_default_to_codex_agent() {
+        let input = CliToolInput {
+            action: Some("ingest_transcript".to_string()),
+            query: None,
+            question: None,
+            queries: vec![],
+            args: vec![],
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            max_output_chars: DEFAULT_MAX_OUTPUT_CHARS,
+            db: None,
+            embedder: None,
+            dimension: None,
+            model2vec_model: None,
+            project_path: None,
+            limit: None,
+            title: None,
+            body: None,
+            tags: vec![],
+            importance: None,
+            memory_id: None,
+            path: Some("transcript.jsonl".to_string()),
+            agent: None,
+        };
+
+        assert_eq!(
+            omx_memory_args(&input).unwrap(),
+            vec!["ingest-transcript", "--agent", "codex", "transcript.jsonl"]
+        );
+        assert!(!omx_memory_action_is_read_only(&input));
     }
 }

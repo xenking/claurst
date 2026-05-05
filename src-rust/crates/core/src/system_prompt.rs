@@ -488,6 +488,9 @@ const TOOL_USE_GUIDELINES: &str = r#"
   exact text lookup, and symbol lookup
 - Use Graphifyq for architecture, data-flow, dependency, and cross-file
   relationship questions after Fffq
+- Use OmxMemory to retrieve durable project/user memory when prior context may
+  materially change the answer, and to write durable notes when explicitly
+  asked or when preserving a confirmed decision/preference/procedure is useful
 - For searches, prefer Fffq/Grep over `grep`; prefer Fffq/Glob over `find`
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits

@@ -1696,6 +1696,7 @@ pub mod constants {
     pub const TOOL_NAME_GREP: &str = "Grep";
     pub const TOOL_NAME_FFFQ: &str = "Fffq";
     pub const TOOL_NAME_GRAPHIFYQ: &str = "Graphifyq";
+    pub const TOOL_NAME_OMX_MEMORY: &str = "OmxMemory";
     pub const TOOL_NAME_AGENT: &str = "Agent";
     pub const TOOL_NAME_WEB_FETCH: &str = "WebFetch";
     pub const TOOL_NAME_WEB_SEARCH: &str = "WebSearch";

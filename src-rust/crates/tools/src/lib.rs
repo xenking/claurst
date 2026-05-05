@@ -61,7 +61,7 @@ pub use bash::BashTool;
 pub use pty_bash::PtyBashTool;
 pub use brief::BriefTool;
 pub use config_tool::ConfigTool;
-pub use cli_inspection::{FffqTool, GraphifyqTool};
+pub use cli_inspection::{FffqTool, GraphifyqTool, OmxMemoryTool};
 pub use cron::{CronCreateTool, CronDeleteTool, CronListTool};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
@@ -494,6 +494,7 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(GrepTool),
         Box::new(FffqTool),
         Box::new(GraphifyqTool),
+        Box::new(OmxMemoryTool),
         Box::new(WebFetchTool),
         Box::new(WebSearchTool),
         Box::new(NotebookEditTool),
@@ -667,7 +668,7 @@ mod tests {
     fn test_core_tools_present() {
         let expected = [
             "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-            "WebFetch", "WebSearch",
+            "Fffq", "Graphifyq", "OmxMemory", "WebFetch", "WebSearch",
             "TodoWrite", "Skill",
         ];
         for name in &expected {
