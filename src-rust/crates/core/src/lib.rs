@@ -283,6 +283,30 @@ pub mod types {
         pub data: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub url: Option<String>,
+        /// Local file-backed image blob.
+        ///
+        /// This keeps pasted images out of persisted conversation context while
+        /// still allowing provider adapters to materialize base64 at the HTTP
+        /// boundary.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub path: Option<String>,
+    }
+
+    impl ImageSource {
+        /// Return inline base64 image data, loading it lazily from `path` when
+        /// this source is file-backed.
+        pub fn base64_data(&self) -> Option<std::borrow::Cow<'_, str>> {
+            if let Some(data) = &self.data {
+                return Some(std::borrow::Cow::Borrowed(data.as_str()));
+            }
+
+            let path = self.path.as_ref()?;
+            let bytes = std::fs::read(path).ok()?;
+            Some(std::borrow::Cow::Owned(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                bytes,
+            )))
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

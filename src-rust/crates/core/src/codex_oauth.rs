@@ -54,6 +54,9 @@ pub struct CodexModelEntry {
     pub id: String,
     pub display_name: String,
     pub description: String,
+    pub context_window: Option<u32>,
+    pub max_context_window: Option<u32>,
+    pub effective_context_window_percent: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +77,28 @@ struct NativeCodexModel {
     visibility: String,
     #[serde(default)]
     priority: i64,
+    context_window: Option<u32>,
+    max_context_window: Option<u32>,
+    effective_context_window_percent: Option<u8>,
+}
+
+/// Context-window hints for the OAuth Codex models Claurst knows about when
+/// native Codex has not fetched `models_cache.json` yet.
+pub fn codex_model_context_window(model_id: &str) -> Option<u32> {
+    match model_id {
+        "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2" => {
+            Some(272_000)
+        }
+        "gpt-5.3-codex-spark" => Some(128_000),
+        _ => None,
+    }
+}
+
+pub fn codex_model_max_context_window(model_id: &str) -> Option<u32> {
+    match model_id {
+        "gpt-5.4" => Some(1_000_000),
+        other => codex_model_context_window(other),
+    }
 }
 
 fn fallback_codex_models() -> Vec<CodexModelEntry> {
@@ -83,6 +108,9 @@ fn fallback_codex_models() -> Vec<CodexModelEntry> {
             id: (*id).to_string(),
             display_name: (*name).to_string(),
             description: "OAuth-backed Codex model".to_string(),
+            context_window: codex_model_context_window(id),
+            max_context_window: codex_model_max_context_window(id),
+            effective_context_window_percent: Some(95),
         })
         .collect()
 }
@@ -126,6 +154,9 @@ fn parse_native_codex_models(text: &str) -> Vec<CodexModelEntry> {
                 id: model.slug,
                 display_name,
                 description,
+                context_window: model.context_window,
+                max_context_window: model.max_context_window,
+                effective_context_window_percent: model.effective_context_window_percent,
             }
         })
         .collect()
@@ -188,6 +219,29 @@ pub fn expires_at_from_now(expires_in_secs: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_native_codex_context_window() {
+        let json = r#"{
+            "models": [{
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "description": "frontier",
+                "visibility": "list",
+                "priority": 0,
+                "context_window": 272000,
+                "max_context_window": 272000,
+                "effective_context_window_percent": 95
+            }]
+        }"#;
+
+        let models = parse_native_codex_models(json);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.5");
+        assert_eq!(models[0].context_window, Some(272_000));
+        assert_eq!(models[0].max_context_window, Some(272_000));
+        assert_eq!(models[0].effective_context_window_percent, Some(95));
+    }
 
     #[test]
     fn test_codex_constants_not_empty() {

@@ -100,7 +100,7 @@ impl CopilotProvider {
             return url.clone();
         }
         let media_type = source.media_type.as_deref().unwrap_or("image/png");
-        let data = source.data.as_deref().unwrap_or("");
+        let data = source.base64_data().unwrap_or_default();
         format!("data:{};base64,{}", media_type, data)
     }
 

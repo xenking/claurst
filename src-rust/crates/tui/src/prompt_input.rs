@@ -1097,12 +1097,9 @@ pub fn handle_paste(
         return (content.to_string(), None);
     }
     *paste_counter += 1;
-    let line_count = content.lines().count();
-    let placeholder = if line_count > 1 {
-        format!("[Pasted text #{} (+{} lines)]", paste_counter, line_count)
-    } else {
-        format!("[Pasted text #{}]", paste_counter)
-    };
+    let line_count = claurst_core::prompt_history::get_pasted_text_ref_num_lines(content);
+    let placeholder =
+        claurst_core::prompt_history::format_pasted_text_ref(*paste_counter, line_count);
     (placeholder, Some(content.to_string()))
 }
 
@@ -1325,6 +1322,11 @@ impl PromptInputState {
     /// Drain and return all pending image attachments (called at send time).
     pub fn clear_images(&mut self) -> Vec<crate::image_paste::PastedImage> {
         std::mem::take(&mut self.pending_images)
+    }
+
+    /// Drain and return large pasted-text blobs captured as prompt references.
+    pub fn clear_paste_contents(&mut self) -> std::collections::HashMap<u32, String> {
+        std::mem::take(&mut self.paste_contents)
     }
 
     /// Insert a character at cursor position.
@@ -2906,6 +2908,18 @@ mod tests {
         handle_paste(&big, &mut counter);
         handle_paste(&big, &mut counter);
         assert_eq!(counter, 2);
+    }
+
+    #[test]
+    fn clear_paste_contents_drains_large_pastes() {
+        let mut state = PromptInputState::new();
+        let big = "x".repeat(2000);
+
+        state.paste(&big);
+        let contents = state.clear_paste_contents();
+
+        assert_eq!(contents.get(&1), Some(&big));
+        assert!(state.paste_contents.is_empty());
     }
 
     // ---- compute_typeahead ---------------------------------------------

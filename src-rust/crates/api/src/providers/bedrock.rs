@@ -352,7 +352,7 @@ impl BedrockProvider {
                     .as_deref()
                     .unwrap_or("image/png")
                     .replace("image/", "");
-                if let Some(data) = &source.data {
+                if let Some(data) = source.base64_data() {
                     Some(json!({
                         "image": {
                             "format": media_type,

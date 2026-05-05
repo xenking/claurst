@@ -100,17 +100,17 @@ pub fn render_image(source: &ImageSource) -> Option<String> {
         return Some(format!("[Image: {}]", url));
     }
 
-    // base64 data source
-    if let Some(data) = &source.data {
+    // base64 data source, either inline or lazily loaded from a local blob.
+    if let Some(data) = source.base64_data() {
         let protocol = detect_image_protocol();
 
         match protocol {
             ImageProtocol::Kitty => {
-                emit_kitty_apc(data, source.media_type.as_deref());
+                emit_kitty_apc(data.as_ref(), source.media_type.as_deref());
                 return None; // successfully emitted — caller skips text line
             }
             ImageProtocol::Sixel => {
-                if emit_sixel(data, source.media_type.as_deref()) {
+                if emit_sixel(data.as_ref(), source.media_type.as_deref()) {
                     return None; // successfully emitted — caller skips text line
                 }
                 // Fall through to text if Sixel conversion fails

@@ -223,12 +223,13 @@ impl OpenAiProvider {
         if let Some(url) = &source.url {
             return url.clone();
         }
-        // base64-encoded image
+        // base64-encoded image, either already in-memory or materialized from
+        // a local file-backed paste blob at request construction time.
         let media_type = source
             .media_type
             .as_deref()
             .unwrap_or("image/png");
-        let data = source.data.as_deref().unwrap_or("");
+        let data = source.base64_data().unwrap_or_default();
         format!("data:{};base64,{}", media_type, data)
     }
 

@@ -715,6 +715,17 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_codex_refresh_uses_native_context_window() {
+        let mut app = make_app();
+        app.config.provider = Some("openai-codex".to_string());
+        app.model_name = "openai-codex/gpt-5.5".to_string();
+
+        app.refresh_context_window_size();
+
+        assert_eq!(app.context_window_size, 272_000);
+    }
+
+    #[test]
     fn test_transcript_scroll_down_recovers_from_overscroll() {
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).unwrap();

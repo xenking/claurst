@@ -43,9 +43,108 @@ use claurst_core::types::ToolDefinition;
 use claurst_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
 use clap::{ArgAction, Parser, ValueEnum};
 use parking_lot::Mutex as ParkingMutex;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::{path::PathBuf, sync::Arc};
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
+
+fn session_blob_dir(session_id: &str) -> Option<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return None;
+    };
+
+    let safe_session_id: String = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(home.join(".claurst").join("blobs").join(safe_session_id))
+}
+
+fn materialize_paste_blobs(
+    input: &str,
+    paste_contents: HashMap<u32, String>,
+    session_id: &str,
+) -> String {
+    if paste_contents.is_empty() {
+        return input.to_string();
+    }
+
+    let Some(blob_dir) = session_blob_dir(session_id) else {
+        return input.to_string();
+    };
+
+    let mut rendered = input.to_string();
+    let mut replacements: Vec<(String, String)> = Vec::new();
+
+    for (id, content) in paste_contents {
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        let short_hash = &hash[..12];
+        let path = blob_dir.join(format!("paste-{}-{}.txt", id, short_hash));
+
+        let write_result = std::fs::create_dir_all(&blob_dir)
+            .and_then(|_| std::fs::write(&path, content.as_bytes()));
+        let line_count = claurst_core::prompt_history::get_pasted_text_ref_num_lines(&content);
+        let placeholder = claurst_core::prompt_history::format_pasted_text_ref(id, line_count);
+        let replacement = match write_result {
+            Ok(()) => format!(
+                "{}\n[Blob #{}: {} bytes, {} line(s), saved at {}. Use the Read tool if you need the full pasted content.]",
+                placeholder,
+                id,
+                content.len(),
+                line_count,
+                path.display()
+            ),
+            Err(err) => format!(
+                "{}\n[Blob #{} capture failed: {}. Full pasted content was not inserted to avoid context bloat.]",
+                placeholder, id, err
+            ),
+        };
+        replacements.push((placeholder, replacement));
+    }
+
+    replacements.sort_by_key(|(placeholder, _)| std::cmp::Reverse(placeholder.len()));
+    for (placeholder, replacement) in replacements {
+        rendered = rendered.replace(&placeholder, &replacement);
+    }
+
+    rendered
+}
+
+fn materialize_image_blob(path: &std::path::Path, session_id: &str) -> PathBuf {
+    let Ok(bytes) = std::fs::read(path) else {
+        return path.to_path_buf();
+    };
+    let Some(blob_dir) = session_blob_dir(session_id) else {
+        return path.to_path_buf();
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = format!("{:x}", hasher.finalize());
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or("png");
+    let blob_path = blob_dir.join(format!("image-{}.{}", &hash[..12], ext));
+
+    match std::fs::create_dir_all(&blob_dir).and_then(|_| std::fs::write(&blob_path, bytes)) {
+        Ok(()) => blob_path,
+        Err(err) => {
+            warn!("failed to materialize pasted image blob: {}", err);
+            path.to_path_buf()
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MCP tool wrapper: makes MCP server tools look like native cc-tools.
@@ -1720,6 +1819,7 @@ async fn run_interactive(
 
                         // Check for slash command
                         if input.starts_with('/') {
+                            let _ = app.prompt_input.clear_paste_contents();
                             let (cmd_name, cmd_args) =
                                 claurst_tui::input::parse_slash_command(&input);
                             let cmd_name = cmd_name.to_string();
@@ -2100,26 +2200,36 @@ async fn run_interactive(
                             .await;
                         }
 
-                        // Regular user message (with optional image attachments)
+                        // Regular user message (with optional blob-backed pasted content
+                        // and image attachments). Large text paste bodies are persisted as
+                        // blobs and replaced with compact references so they do not inflate
+                        // conversation context unless the model explicitly reads them.
+                        let paste_blobs = app.prompt_input.clear_paste_contents();
+                        let input_for_model =
+                            materialize_paste_blobs(&input, paste_blobs, &tool_ctx.session_id);
                         let pending_imgs = app.prompt_input.clear_images();
                         let user_msg = if pending_imgs.is_empty() {
-                            claurst_core::types::Message::user(input.clone())
+                            claurst_core::types::Message::user(input_for_model.clone())
                         } else {
                             let mut blocks: Vec<claurst_core::types::ContentBlock> = pending_imgs
                                 .iter()
-                                .filter_map(|img| {
-                                    claurst_tui::image_paste::encode_image_base64(&img.path)
-                                        .map(|b64| claurst_core::types::ContentBlock::Image {
-                                            source: claurst_core::types::ImageSource {
-                                                source_type: "base64".to_string(),
-                                                media_type: Some("image/png".to_string()),
-                                                data: Some(b64),
-                                                url: None,
-                                            },
-                                        })
+                                .map(|img| {
+                                    let blob_path =
+                                        materialize_image_blob(&img.path, &tool_ctx.session_id);
+                                    claurst_core::types::ContentBlock::Image {
+                                        source: claurst_core::types::ImageSource {
+                                            source_type: "file".to_string(),
+                                            media_type: Some("image/png".to_string()),
+                                            data: None,
+                                            url: None,
+                                            path: Some(blob_path.to_string_lossy().to_string()),
+                                        },
+                                    }
                                 })
                                 .collect();
-                            blocks.push(claurst_core::types::ContentBlock::Text { text: input.clone() });
+                            blocks.push(claurst_core::types::ContentBlock::Text {
+                                text: input_for_model.clone(),
+                            });
                             claurst_core::types::Message::user_blocks(blocks)
                         };
                         messages.push(user_msg.clone());
@@ -3499,4 +3609,3 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
         None => serde_json::Value::Null,
     }
 }
-

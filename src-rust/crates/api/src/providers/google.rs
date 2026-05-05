@@ -137,7 +137,7 @@ impl GoogleProvider {
 
             ContentBlock::Image { source } => {
                 // Prefer base64 inline data; fall back to URL if available.
-                if let (Some(data), Some(mime)) = (&source.data, &source.media_type) {
+                if let (Some(data), Some(mime)) = (source.base64_data(), &source.media_type) {
                     Some(json!({
                         "inlineData": {
                             "data": data,

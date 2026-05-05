@@ -1796,6 +1796,10 @@ impl App {
             self.context_window_size = match provider {
                 "anthropic" => 200_000,
                 "openai" => 128_000,
+                "codex" | "openai-codex" => {
+                    claurst_core::codex_oauth::codex_model_context_window(model_id)
+                        .unwrap_or(128_000) as u64
+                }
                 "google" => 1_048_576,
                 _ => 128_000,
             };

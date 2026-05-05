@@ -84,6 +84,7 @@ impl ModelRegistry {
     fn load_bundled_snapshot(&mut self) {
         self.add_anthropic_models();
         self.add_openai_models();
+        self.add_codex_models();
         self.add_google_models();
         self.add_deepseek_models();
         self.add_zai_models();
@@ -143,6 +144,36 @@ impl ModelRegistry {
                 family: Some("gpt".to_string()),
                 status: "active".to_string(),
             });
+        }
+    }
+
+    fn add_codex_models(&mut self) {
+        for provider_id in [ProviderId::CODEX, "openai-codex"] {
+            let pid = ProviderId::new(provider_id);
+            for model in claurst_core::codex_oauth::available_codex_models() {
+                let context_window = model
+                    .context_window
+                    .or_else(|| claurst_core::codex_oauth::codex_model_context_window(&model.id))
+                    .unwrap_or(128_000);
+                self.insert(ModelEntry {
+                    info: ModelInfo {
+                        id: ModelId::new(model.id.as_str()),
+                        provider_id: pid.clone(),
+                        name: model.display_name,
+                        context_window,
+                        max_output_tokens: 100_000,
+                    },
+                    cost_input: None,
+                    cost_output: None,
+                    cost_cache_read: None,
+                    cost_cache_write: None,
+                    tool_calling: true,
+                    reasoning: true,
+                    vision: true,
+                    family: Some("gpt".to_string()),
+                    status: "active".to_string(),
+                });
+            }
         }
     }
 
@@ -624,6 +655,34 @@ impl ModelRegistry {
 impl Default for ModelRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_registry_contains_openai_codex_gpt55_context() {
+        let registry = ModelRegistry::new();
+
+        let entry = registry
+            .get("openai-codex", "gpt-5.5")
+            .expect("openai-codex/gpt-5.5 should be registered");
+        assert_eq!(entry.info.context_window, 272_000);
+        assert!(entry.reasoning);
+        assert!(entry.tool_calling);
+        assert!(entry.vision);
+    }
+
+    #[test]
+    fn bundled_registry_contains_codex_alias() {
+        let registry = ModelRegistry::new();
+
+        let entry = registry
+            .get("codex", "gpt-5.5")
+            .expect("codex/gpt-5.5 should be registered");
+        assert_eq!(entry.info.context_window, 272_000);
     }
 }
 
