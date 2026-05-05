@@ -1172,6 +1172,7 @@ pub mod config {
                 Some("azure") => "gpt-4o",
                 Some("amazon-bedrock") => "anthropic.claude-sonnet-4-6-v1",
                 Some("venice") => "llama-3.3-70b",
+                Some("codex") | Some("openai-codex") => crate::codex_oauth::DEFAULT_CODEX_MODEL,
                 _ => crate::constants::DEFAULT_MODEL, // Anthropic default
             }
         }
@@ -3827,6 +3828,13 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.model = Some("claude-haiku-4-5-20251001".to_string());
         assert_eq!(cfg.effective_model(), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_config_effective_model_openai_codex_default() {
+        let mut cfg = crate::config::Config::default();
+        cfg.provider = Some("openai-codex".to_string());
+        assert_eq!(cfg.effective_model(), crate::codex_oauth::DEFAULT_CODEX_MODEL);
     }
 
     #[test]

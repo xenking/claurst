@@ -94,11 +94,15 @@ pub fn model_supports_effort(id: &str) -> bool {
     id.starts_with("claude-3-7")
         || id.starts_with("claude-opus-4")
         || id.starts_with("claude-sonnet-4")
+        || id.starts_with("gpt-5")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
 }
 
 /// Returns `true` for models that support the maximum effort tier.
 pub fn model_supports_max_effort(id: &str) -> bool {
-    id.starts_with("claude-opus-4")
+    id.starts_with("claude-opus-4") || id.starts_with("gpt-5")
 }
 
 /// Returns a short description string based on the model family inferred from
@@ -345,14 +349,10 @@ pub fn models_for_provider(provider_id: &str) -> Vec<ModelEntry> {
             model_entry("google/gemini-2.5-pro", "Gemini 2.5 Pro", "via OpenRouter"),
             model_entry("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B", "via OpenRouter"),
         ],
-        "codex" | "openai-codex" => vec![
-            model_entry("gpt-5.2-codex", "GPT-5.2 Codex", "OAuth-backed Codex default"),
-            model_entry("gpt-5.1-codex", "GPT-5.1 Codex", "Previous Codex generation"),
-            model_entry("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", "Smaller Codex model"),
-            model_entry("gpt-5.1-codex-max", "GPT-5.1 Codex Max", "Larger Codex model"),
-            model_entry("gpt-5.4", "GPT-5.4", "General frontier model via Codex auth"),
-            model_entry("gpt-5.2", "GPT-5.2", "General model via Codex auth"),
-        ],
+        "codex" | "openai-codex" => claurst_core::codex_oauth::available_codex_models()
+            .into_iter()
+            .map(|model| model_entry(&model.id, &model.display_name, &model.description))
+            .collect(),
         "github-copilot" => vec![
             model_entry("claude-sonnet-4.6", "Claude Sonnet 4.6", "via Copilot"),
             model_entry("claude-sonnet-4.5", "Claude Sonnet 4.5", "via Copilot"),
@@ -436,8 +436,8 @@ pub fn default_model_for_provider(provider_id: &str) -> String {
         "xai" => "xai/grok-2".to_string(),
         "openrouter" => "openrouter/anthropic/claude-sonnet-4".to_string(),
         "github-copilot" => "github-copilot/gpt-4o".to_string(),
-        "codex" => "codex/gpt-5.2-codex".to_string(),
-        "openai-codex" => "openai-codex/gpt-5.2-codex".to_string(),
+        "codex" => format!("codex/{}", claurst_core::codex_oauth::DEFAULT_CODEX_MODEL),
+        "openai-codex" => format!("openai-codex/{}", claurst_core::codex_oauth::DEFAULT_CODEX_MODEL),
         "cohere" => "cohere/command-r-plus".to_string(),
         "perplexity" => "perplexity/sonar-pro".to_string(),
         "togetherai" | "together-ai" => "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo".to_string(),
@@ -1206,6 +1206,29 @@ mod tests {
         let models = models_for_provider("ollama");
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"llama3.2"));
+    }
+
+    #[test]
+    fn models_for_provider_openai_codex_uses_native_frontier_default() {
+        let models = models_for_provider("openai-codex");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids.first().copied(), Some(claurst_core::codex_oauth::DEFAULT_CODEX_MODEL));
+        assert!(ids.contains(&"gpt-5.5"));
+        assert!(ids.contains(&"gpt-5.4"));
+    }
+
+    #[test]
+    fn gpt5_models_support_effort_controls() {
+        assert!(model_supports_effort("gpt-5.5"));
+        assert!(model_supports_max_effort("gpt-5.5"));
+    }
+
+    #[test]
+    fn default_model_for_provider_openai_codex_uses_frontier() {
+        assert_eq!(
+            default_model_for_provider("openai-codex"),
+            format!("openai-codex/{}", claurst_core::codex_oauth::DEFAULT_CODEX_MODEL)
+        );
     }
 
     #[test]

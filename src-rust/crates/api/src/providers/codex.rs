@@ -9,8 +9,7 @@
 // Token refresh: if `expires_at` is in the past we POST to the OpenAI token
 //   endpoint with `grant_type=refresh_token` before making the request.
 //
-// Model list: static — the Codex endpoint does not expose a /models route,
-//   so we use the `CODEX_MODELS` constant from `claurst-core`.
+// Model list: native Codex cache first, with a baked-in fallback.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -19,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_stream::stream;
 use async_trait::async_trait;
 use claurst_core::codex_oauth::{
-    CODEX_API_ENDPOINT, CODEX_MODELS, CODEX_TOKEN_URL, DEFAULT_CODEX_MODEL,
+    available_codex_models, CODEX_API_ENDPOINT, CODEX_TOKEN_URL, DEFAULT_CODEX_MODEL,
 };
 use claurst_core::oauth_config::{get_codex_tokens, save_codex_tokens, CodexTokens};
 use claurst_core::provider_id::{ModelId, ProviderId};
@@ -1047,14 +1046,24 @@ impl LlmProvider for CodexProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let models = CODEX_MODELS
-            .iter()
-            .map(|(id, name)| ModelInfo {
-                id: ModelId::new(*id),
+        let models = available_codex_models()
+            .into_iter()
+            .map(|model| ModelInfo {
+                id: ModelId::new(model.id.clone()),
                 provider_id: self.id.clone(),
-                name: name.to_string(),
-                context_window: match *id {
-                    "gpt-5.4" | "gpt-5-codex" | "gpt-5-mini" => 400_000,
+                name: model.display_name,
+                context_window: match model.id.as_str() {
+                    "gpt-5.5" | "gpt-5.4" => 1_048_576,
+                    "gpt-5.4-mini"
+                    | "gpt-5.3-codex"
+                    | "gpt-5.3-codex-spark"
+                    | "gpt-5.2-codex"
+                    | "gpt-5.1-codex"
+                    | "gpt-5.1-codex-mini"
+                    | "gpt-5.1-codex-max"
+                    | "gpt-5-codex"
+                    | "gpt-5-mini" => 400_000,
+                    "gpt-5.2" => 400_000,
                     "gpt-4.1" => 128_000,
                     "o4-mini" => 200_000,
                     _ => 128_000,

@@ -2,7 +2,9 @@
 //!
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::Deserialize;
 use serde_json::Value;
+use std::path::PathBuf;
 
 /// OpenAI Codex OAuth client ID (shared with the OpenCode ecosystem).
 pub const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -30,16 +32,122 @@ pub const CODEX_SCOPES: &str = "openid profile email offline_access";
 
 /// Available Codex models
 pub const CODEX_MODELS: &[(&str, &str)] = &[
-    ("gpt-5.2-codex", "GPT-5.2 Codex (default)"),
+    ("gpt-5.5", "GPT-5.5 (default)"),
+    ("gpt-5.4", "GPT-5.4"),
+    ("gpt-5.4-mini", "GPT-5.4 Mini"),
+    ("gpt-5.3-codex", "GPT-5.3 Codex"),
+    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
+    ("gpt-5.2", "GPT-5.2"),
+    ("gpt-5.2-codex", "GPT-5.2 Codex"),
     ("gpt-5.1-codex", "GPT-5.1 Codex"),
     ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini"),
     ("gpt-5.1-codex-max", "GPT-5.1 Codex Max"),
-    ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.2", "GPT-5.2"),
 ];
 
 /// Default Codex model to use
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.2-codex";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+
+/// A Codex model exposed by either Claurst's fallback table or native Codex's
+/// `~/.codex/models_cache.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexModelEntry {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeCodexModelsCache {
+    #[serde(default)]
+    models: Vec<NativeCodexModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeCodexModel {
+    #[serde(default)]
+    slug: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    visibility: String,
+    #[serde(default)]
+    priority: i64,
+}
+
+fn fallback_codex_models() -> Vec<CodexModelEntry> {
+    CODEX_MODELS
+        .iter()
+        .map(|(id, name)| CodexModelEntry {
+            id: (*id).to_string(),
+            display_name: (*name).to_string(),
+            description: "OAuth-backed Codex model".to_string(),
+        })
+        .collect()
+}
+
+fn codex_home_dir() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+}
+
+/// Native Codex model cache path, if the Codex CLI has fetched one.
+pub fn native_codex_models_cache_path() -> Option<PathBuf> {
+    codex_home_dir().map(|home| home.join("models_cache.json"))
+}
+
+fn parse_native_codex_models(text: &str) -> Vec<CodexModelEntry> {
+    let Ok(mut cache) = serde_json::from_str::<NativeCodexModelsCache>(text) else {
+        return Vec::new();
+    };
+
+    cache.models.sort_by_key(|model| model.priority);
+    let mut seen = std::collections::HashSet::new();
+    cache
+        .models
+        .into_iter()
+        .filter(|model| !model.slug.is_empty())
+        .filter(|model| model.visibility == "list")
+        .filter(|model| seen.insert(model.slug.clone()))
+        .map(|model| {
+            let display_name = if model.display_name.is_empty() {
+                model.slug.clone()
+            } else {
+                model.display_name
+            };
+            let description = if model.description.is_empty() {
+                "Native Codex model".to_string()
+            } else {
+                model.description
+            };
+            CodexModelEntry {
+                id: model.slug,
+                display_name,
+                description,
+            }
+        })
+        .collect()
+}
+
+/// Available Codex models, preferring native Codex's current cache and falling
+/// back to Claurst's baked-in list for first-run/offline use.
+pub fn available_codex_models() -> Vec<CodexModelEntry> {
+    let mut models = native_codex_models_cache_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| parse_native_codex_models(&text))
+        .unwrap_or_default();
+
+    let mut seen: std::collections::HashSet<String> =
+        models.iter().map(|model| model.id.clone()).collect();
+    for model in fallback_codex_models() {
+        if seen.insert(model.id.clone()) {
+            models.push(model);
+        }
+    }
+    models
+}
 
 /// Extract the ChatGPT account identifier expected by the Codex backend.
 ///
@@ -140,4 +248,33 @@ mod tests {
 
         assert!(expires_at >= now + 3599);
     }
+    #[test]
+    fn test_codex_default_tracks_native_frontier() {
+        assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.5");
+        assert_eq!(
+            CODEX_MODELS.first().map(|(id, _)| *id),
+            Some(DEFAULT_CODEX_MODEL)
+        );
+    }
+
+    #[test]
+    fn test_parse_native_codex_models_filters_hidden_and_sorts_by_priority() {
+        let cache = r#"{
+            "models": [
+                {"slug":"hidden","display_name":"Hidden","description":"nope","visibility":"hidden","priority":0},
+                {"slug":"gpt-5.4","display_name":"GPT-5.4","description":"older","visibility":"list","priority":20},
+                {"slug":"gpt-5.5","display_name":"GPT-5.5","description":"frontier","visibility":"list","priority":10},
+                {"slug":"gpt-5.5","display_name":"Duplicate","description":"dupe","visibility":"list","priority":30}
+            ]
+        }"#;
+
+        let models = parse_native_codex_models(cache);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-5.5", "gpt-5.4"]
+        );
+        assert_eq!(models[0].display_name, "GPT-5.5");
+        assert_eq!(models[0].description, "frontier");
+    }
+
 }

@@ -394,14 +394,18 @@ fn write_text_linux_selection(text: &str, primary: bool) -> bool {
     false
 }
 
+static TEMP_PNG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn make_temp_png() -> Option<PathBuf> {
     let tmp_dir = std::env::temp_dir();
     let name = format!(
-        "claude-paste-{}.png",
+        "claude-paste-{}-{}-{}.png",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        TEMP_PNG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     Some(tmp_dir.join(name))
 }
