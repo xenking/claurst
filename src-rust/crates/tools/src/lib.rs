@@ -21,6 +21,7 @@ pub mod pty_bash;
 pub mod brief;
 pub mod config_tool;
 pub mod cron;
+pub mod cli_inspection;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod apply_patch;
@@ -60,6 +61,7 @@ pub use bash::BashTool;
 pub use pty_bash::PtyBashTool;
 pub use brief::BriefTool;
 pub use config_tool::ConfigTool;
+pub use cli_inspection::{FffqTool, GraphifyqTool};
 pub use cron::{CronCreateTool, CronDeleteTool, CronListTool};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
@@ -490,6 +492,8 @@ pub fn all_tools() -> Vec<Box<dyn Tool>> {
         Box::new(ApplyPatchTool),
         Box::new(GlobTool),
         Box::new(GrepTool),
+        Box::new(FffqTool),
+        Box::new(GraphifyqTool),
         Box::new(WebFetchTool),
         Box::new(WebSearchTool),
         Box::new(NotebookEditTool),

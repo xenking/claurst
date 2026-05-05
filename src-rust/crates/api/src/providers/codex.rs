@@ -226,7 +226,9 @@ impl CodexProvider {
     ) -> reqwest::RequestBuilder {
         let builder = builder
             .bearer_auth(token)
-            .header("User-Agent", "claurst/0.0.9");
+            .header("User-Agent", "claurst/0.0.9")
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("originator", "claurst");
 
         if let Some(id) = account_id {
             builder.header("ChatGPT-Account-Id", id)
@@ -276,13 +278,46 @@ impl CodexProvider {
             "input": input,
             "instructions": instructions,
             "store": false,
+            "text": {
+                "verbosity": "medium",
+            },
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
         });
 
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
 
+        Self::merge_codex_provider_options(&mut body, &request.provider_options);
+
         body
+    }
+
+    fn merge_codex_provider_options(body: &mut Value, provider_options: &Value) {
+        let Some(options) = provider_options.as_object() else {
+            return;
+        };
+
+        for (key, value) in options {
+            match key.as_str() {
+                "reasoningEffort" => {
+                    body["reasoning"]["effort"] = value.clone();
+                }
+                "reasoningSummary" => {
+                    body["reasoning"]["summary"] = value.clone();
+                }
+                "textVerbosity" => {
+                    body["text"]["verbosity"] = value.clone();
+                }
+                "include" => {
+                    body["include"] = value.clone();
+                }
+                _ => {
+                    body[key] = value.clone();
+                }
+            }
+        }
     }
 
     fn extract_stream_error_message(json_val: &Value) -> String {
@@ -1060,5 +1095,36 @@ impl LlmProvider for CodexProvider {
             structured_output: false,
             system_prompt_style: SystemPromptStyle::SystemMessage,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_codex_provider_options_maps_reasoning_and_include() {
+        let mut body = json!({
+            "model": "gpt-5.3-codex",
+            "input": [],
+            "text": {
+                "verbosity": "medium"
+            }
+        });
+
+        CodexProvider::merge_codex_provider_options(
+            &mut body,
+            &json!({
+                "reasoningEffort": "high",
+                "reasoningSummary": "auto",
+                "include": ["reasoning.encrypted_content"],
+                "textVerbosity": "low"
+            }),
+        );
+
+        assert_eq!(body["reasoning"]["effort"], json!("high"));
+        assert_eq!(body["reasoning"]["summary"], json!("auto"));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["text"]["verbosity"], json!("low"));
     }
 }

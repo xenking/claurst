@@ -484,7 +484,11 @@ const TOOL_USE_GUIDELINES: &str = r#"
 ## Tool use guidelines
 
 - Use dedicated tools (Read, Edit, Glob, Grep) instead of bash equivalents
-- For searches, prefer Grep over `grep`; prefer Glob over `find`
+- For repository inspection, use Fffq before Grep/Glob/Bash for file discovery,
+  exact text lookup, and symbol lookup
+- Use Graphifyq for architecture, data-flow, dependency, and cross-file
+  relationship questions after Fffq
+- For searches, prefer Fffq/Grep over `grep`; prefer Fffq/Glob over `find`
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits
 - Bash commands timeout after 2 minutes; use background mode for long operations

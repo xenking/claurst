@@ -313,6 +313,25 @@ fn build_provider_options(
         }
     }
 
+    if provider_id == "codex" || provider_id == "openai-codex" {
+        let reasoning_effort = effort_level
+            .map(reasoning_effort_for_level)
+            .unwrap_or("medium");
+        options.insert(
+            "reasoningEffort".to_string(),
+            serde_json::json!(reasoning_effort),
+        );
+        options.insert(
+            "reasoningSummary".to_string(),
+            serde_json::json!("auto"),
+        );
+        options.insert(
+            "include".to_string(),
+            serde_json::json!(["reasoning.encrypted_content"]),
+        );
+        options.insert("textVerbosity".to_string(), serde_json::json!("medium"));
+    }
+
     if provider_id == "google" && model_id.contains("gemini") {
         if model_id.contains("2.5") {
             if let Some(budget) = thinking_budget {
@@ -2347,6 +2366,23 @@ mod tests {
         assert_eq!(options["reasoningEffort"], serde_json::json!("medium"));
         assert_eq!(options["textVerbosity"], serde_json::json!("low"));
         assert_eq!(options["usage"]["include"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_build_provider_options_for_openai_codex() {
+        let options = build_provider_options(
+            "openai-codex",
+            "gpt-5.3-codex",
+            Some(claurst_core::effort::EffortLevel::High),
+            None,
+        );
+        assert_eq!(options["reasoningEffort"], serde_json::json!("high"));
+        assert_eq!(options["reasoningSummary"], serde_json::json!("auto"));
+        assert_eq!(
+            options["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(options["textVerbosity"], serde_json::json!("medium"));
     }
 
     #[test]
