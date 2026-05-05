@@ -33,12 +33,21 @@ use claurst_core::keybindings::{
 };
 use claurst_core::types::{ContentBlock, Message, Role};
 use claurst_query::QueryEvent;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::style::Color;
 use ratatui::Terminal;
 use std::cell::{Cell, RefCell};
 use std::io::Stdout;
+use std::path::Path;
+use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 use tracing::debug;
 
@@ -98,6 +107,39 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("vim", "Toggle vim keybindings"),
     ("voice", "Toggle voice input mode"),
 ];
+
+fn memory_editor_command(editor: &str, path: &Path) -> Command {
+    let mut command = Command::new(editor);
+    if cfg!(target_os = "macos") && editor == "open" {
+        command.arg("-t").arg("-W");
+    }
+    command.arg(path);
+    command
+}
+
+fn suspend_tui_for_child_process() {
+    let _ = disable_raw_mode();
+    let mut stdout = std::io::stdout();
+    let _ = execute!(
+        stdout,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        crossterm::cursor::Show,
+    );
+}
+
+fn resume_tui_after_child_process() {
+    let mut stdout = std::io::stdout();
+    let _ = execute!(stdout, EnterAlternateScreen, EnableMouseCapture);
+    let _ = enable_raw_mode();
+}
+
+fn run_memory_editor(editor: &str, path: &Path) -> std::io::Result<ExitStatus> {
+    suspend_tui_for_child_process();
+    let result = memory_editor_command(editor, path).status();
+    resume_tui_after_child_process();
+    result
+}
 
 fn help_command_category(name: &str) -> &'static str {
     match name {
@@ -1817,15 +1859,11 @@ impl App {
                 }
             });
 
-        let mut command = std::process::Command::new(&editor);
-        if cfg!(target_os = "macos") && editor == "open" {
-            command.arg("-t");
-        }
-        let result = command.arg(&path).spawn();
+        let result = run_memory_editor(&editor, &path);
         self.memory_file_selector.close();
         match result {
             Ok(_) => {
-                self.status_message = Some(format!("Opened memory file: {}", path.display()));
+                self.status_message = Some(format!("Edited memory file: {}", path.display()));
             }
             Err(err) => {
                 self.status_message = Some(format!("Could not open {}: {}", path.display(), err));
@@ -5799,6 +5837,22 @@ mod tests {
             modifiers,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn memory_editor_command_waits_for_macos_open() {
+        let path = Path::new("/tmp/AGENTS.md");
+        let command = memory_editor_command("open", path);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(args, vec!["-t", "-W", "/tmp/AGENTS.md"]);
+        } else {
+            assert_eq!(args, vec!["/tmp/AGENTS.md"]);
         }
     }
 
